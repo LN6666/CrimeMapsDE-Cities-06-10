@@ -163,3 +163,63 @@ def test_robots_disallow_stops_before_archive_request(tmp_path, monkeypatch):
     db = connect(db_path)
     assert db.execute("SELECT count(*) FROM reports").fetchone()[0] == 0
     db.close()
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("target", ["robots", "listing"])
+def test_first_source_status_stops_without_retry(tmp_path, monkeypatch, status, target):
+    requested = []
+    robots_url = stuttgart.ORIGIN + "/robots.txt"
+    pages = {
+        robots_url: (status if target == "robots" else 200, "User-agent: *\nDisallow: /images/\n"),
+        stuttgart.NEWSROOM: (status, "unavailable"),
+    }
+    monkeypatch.setattr(stuttgart.httpx, "Client", lambda **_: FakeClient(pages, requested))
+    monkeypatch.setattr(stuttgart.time, "sleep", lambda _: None)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        stuttgart.sync(tmp_path / "stopped.sqlite", 2026)
+    assert requested == ([robots_url] if target == "robots" else [robots_url, stuttgart.NEWSROOM])
+
+
+@pytest.mark.parametrize("status", [429, 503, 200])
+def test_first_article_error_stops_batch_and_preserves_pending(tmp_path, monkeypatch, status):
+    requested = []
+    first_id, second_id = "6359823", "6352287"
+    first_url = stuttgart.ORIGIN + f"/blaulicht/pm/110977/{first_id}"
+    second_url = stuttgart.ORIGIN + f"/blaulicht/pm/110977/{second_id}"
+    pages = {
+        stuttgart.ORIGIN + "/robots.txt": (200, "User-agent: *\nDisallow: /images/\n"),
+        stuttgart.NEWSROOM: (
+            200,
+            listing([
+                (first_id, "27.09.2026 &ndash; 12:03", "Stuttgart"),
+                (second_id, "26.09.2026 &ndash; 12:03", "Ludwigsburg"),
+            ]),
+        ),
+        first_url: (
+            status,
+            article(publisher="Polizeipräsidium Ludwigsburg") if status == 200 else "unavailable",
+        ),
+        second_url: (200, article()),
+    }
+    monkeypatch.setattr(stuttgart.httpx, "Client", lambda **_: FakeClient(pages, requested))
+    monkeypatch.setattr(stuttgart.time, "sleep", lambda _: None)
+
+    result = stuttgart.sync(tmp_path / "articles.sqlite", 2026, limit=2)
+    assert result["failed"] == 1
+    assert result["pending"] == 2
+    assert result["stopped_on_source_error"] == {
+        "source_id": first_id,
+        "http_status": None if status == 200 else status,
+        "error_type": "ValueError" if status == 200 else "HTTPStatusError",
+    }
+    assert requested.count(first_url) == 1
+    assert second_url not in requested
+    db = connect(tmp_path / "articles.sqlite")
+    first = db.execute("SELECT body,http_status,failures,error FROM reports WHERE id=?", (first_id,)).fetchone()
+    second = db.execute("SELECT body,error FROM reports WHERE id=?", (second_id,)).fetchone()
+    assert first["body"] is None and first["http_status"] == result["stopped_on_source_error"]["http_status"]
+    assert first["failures"] == 1 and first["error"]
+    assert second["body"] is None and second["error"] is None
+    db.close()
