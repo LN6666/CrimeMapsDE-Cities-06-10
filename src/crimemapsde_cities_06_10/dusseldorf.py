@@ -248,7 +248,7 @@ def sync(path, year, *, full=False, limit=30, delay=1.0, max_pages=None):
     started = time.time()
     stats = {"year": year, "full_archive_scan": full, "archive_complete": False,
              "archive_pages": 0, "discovered": 0, "new": 0, "revised": 0,
-             "unchanged": 0, "failed": 0}
+             "unchanged": 0, "failed": 0, "stopped_on_source_error": None}
     db.execute("INSERT INTO runs(started) VALUES(?)", (started,))
     db.commit()
     with httpx.Client(timeout=25, follow_redirects=False,
@@ -342,9 +342,15 @@ def sync(path, year, *, full=False, limit=30, delay=1.0, max_pages=None):
                                     response.headers, time.time())
                 stats[result] += 1
             except (httpx.HTTPError, ValueError) as exc:
+                status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 fail(db, row["id"], f"{type(exc).__name__}: {exc}", time.time(),
-                     exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None)
+                     status)
                 stats["failed"] += 1
+                stats["stopped_on_source_error"] = {
+                    "source_id": row["id"], "http_status": status,
+                    "error_type": type(exc).__name__,
+                }
+                break
         stats["stored"] = db.execute("SELECT count(*) FROM reports WHERE body IS NOT NULL").fetchone()[0]
         stats["pending"] = db.execute("SELECT count(*) FROM reports WHERE body IS NULL").fetchone()[0]
         stats["errors"] = db.execute("SELECT count(*) FROM reports WHERE error IS NOT NULL").fetchone()[0]
