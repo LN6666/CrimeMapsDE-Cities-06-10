@@ -32,6 +32,21 @@ uv run python -m crimemapsde_cities_06_10.dortmund --year 2026 --pages 1 --limit
 
 Düsseldorf 和 Dortmund 的市域结论必须引用当前原文，修订后旧结论失效；Stuttgart 的列表地域只存为待审核线索。此仓库没有地理编码、逐篇内容复核与所有者发布批准的完整流程，因而任何本地记录都不构成可发布地图。
 
+## 五城来源契约与只读审计
+
+`registry.py` 固定五城的 slug、显示名、供未来米制 GIS 使用的 EPSG、来源类型和本地库路径。西部四城采用 ETRS89 / UTM 32N（[EPSG:25832](https://epsg.org/crs_25832/ETRS89-UTM-zone-32N.html)）；Leipzig 采用 UTM 33N（[EPSG:25833](https://epsg.org/crs_25833/ETRS89-UTM-zone-33N.html)）。这些 CRS 仅是接口元数据，当前没有计算坐标。
+
+第一组可用只读命令从本地检查点生成版本化 JSON 来源清单：
+
+```sh
+uv run python -m crimemapsde_cities_06_10.source_audit --city dortmund \
+  --out .runtime/cities/dortmund/source-audit.json
+```
+
+省略 `--out` 时写到标准输出；可用 `--db` 指定本地数据库。`schema_version: 1` 的清单包含 `city`、`readiness`、`checkpoint_scans`、`counts`、`records` 和 `location_candidates`。每条记录保留来源 ID、URL、日期、原文 SHA-256、修订号、市域结论及审核状态。Dortmund 另保留原生节点 ID 和警方编号。导出过程只读取数据库，不写入或修改检查点；JSON **不包含原文或市域证据引文**。导出文件应放在 `.runtime/` 等 Git 忽略目录，不能提交或上传。
+
+`location_candidates` 只是供后续逐篇定位审核的来源引用，没有坐标。必须有匹配城市官方来源格式的 URL/ID、带时区的日期、当前原文与匹配哈希、有效修订号和与该哈希绑定的市域证据，才可能出现于该列表。Stuttgart 的列表地域不算市域证据；Leipzig 通报和 Bremen 分组页是人工提供的多事件单元，即使后来有市域标注，也不产生定位候选。清单内文章复核状态当前一律为 `pending`，所有者仍需检查并批准。五城清单的 `archive_complete`、`source_verified`、`publication_ready` 均明确为 `false`，`blocking_reasons` 列出原因；扫描断点完成不等于档案完整。
+
 ## Leipzig 和 Bremen 的离线入口
 
 两城的官方档案仍可供人在浏览器中查阅，但本程序当前无法验证其 robots 规则，因此**不会自动请求档案或文章**。可以将已人工核对的官方材料存为 Git 忽略目录中的 JSONL，再限量导入本地库：
