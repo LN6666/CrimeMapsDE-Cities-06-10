@@ -69,6 +69,19 @@ def test_article_excludes_navigation_contacts_and_foreign_publisher():
         stuttgart.article_body(article(publisher="Polizeipräsidium Ludwigsburg"))
 
 
+def test_article_accepts_legacy_preformatted_body():
+    page = article().replace(
+        '<p>Stuttgart (ots) - Eine Person berichtete über einen Vorfall am Marktplatz. '
+        'Der eigentliche Sachverhalt wird hier nur für einen Parser-Test beschrieben.</p>',
+        '<p>Stuttgart-Stammheim (ots)</p><pre>Eine Person berichtete über einen Vorfall '
+        'am Marktplatz. Der vollständige ältere Meldungstext steht in einem pre-Element.</pre>',
+    )
+    body = stuttgart.article_body(page)
+    assert "Stuttgart-Stammheim (ots)" in body
+    assert "vollständige ältere Meldungstext" in body
+    assert "Falschestraße" not in body
+
+
 class FakeClient:
     def __init__(self, pages, requested):
         self.pages = pages
