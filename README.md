@@ -18,10 +18,10 @@
 
 | 城市 | 当前检查点 | 仍待处理 |
 | --- | ---: | --- |
-| Düsseldorf | 64 / 4 | 60 篇正文、年度遍历、市域与逐篇语义复核 |
-| Stuttgart | 60 / 6 | 54 篇正文、年度遍历、市域与逐篇语义复核 |
-| Leipzig | 6 / 2 | 仅完成 1 页、2 篇正文的小型实网探针；4 篇待正文，年度遍历与逐篇审核未完成 |
-| Dortmund | 20 / 4 | 16 篇正文、年度遍历、市域与逐篇语义复核 |
+| Düsseldorf | 394 / 394 | 警方署名新闻室通道遍历完成、0 缺失正文、0 来源错误；市域与逐篇语义复核待完成 |
+| Stuttgart | 1,051 / 1,051 | 警方链接新闻室历史通道遍历完成、0 缺失正文、0 来源错误；市域与逐篇语义复核待完成 |
+| Leipzig | 346 / 346 | 官方 Medienservice 2026 通道 58 页遍历完成、0 缺失正文、0 来源错误；多案件市域与场景复核待完成 |
+| Dortmund | 735 / 735 | 警方原生档案 2026 通道遍历完成、0 缺失正文、0 来源错误；市域与逐篇语义复核待完成 |
 | Bremen | 639 / 639 | 警方署名新闻室的 2026 遍历已完成；仍需逐篇市域、多场景复核，且不证明原生档案等价 |
 
 这些计数只存在于本机检查点，没有原文、数据库或生成数据进入 Git。所有市域标签均为待 LLM 对照原文的线索，不是批准结论。
@@ -95,7 +95,7 @@ uv run python -m crimemapsde_cities_06_10.leipzig --input .runtime/cities/leipzi
 uv run python -m crimemapsde_cities_06_10.bremen --input .runtime/cities/bremen/import.jsonl --limit 10
 ```
 
-每行 JSON 对象需有 `publisher`、`url`、带时区的 `published`、`title`、`body`。Leipzig 的 `publisher` 固定为 `Polizeidirektion Leipzig`，URL 形如 `https://medienservice.sachsen.de/medien/news/1100200`；Bremen 的 `publisher` 固定为 `Polizei Bremen`，URL 是官方分组页面，例如 `https://www.polizei.bremen.de/news/pressestelle/pressemeldungen-ab-11092026-69054`。导入器按输入文件哈希和行号断点续跑，重复导入会检测修订；它无法自行验证人工提供的原文与官方网页相同。Leipzig 通报和 Bremen 原生分组页一律标为多事件来源单元，保持不可发布，也不会从一个页面推断出一个案发点。两城历史覆盖仍不完整；任何扫描完成标记都只适用于对应来源渠道，不能证明警方公告全集完整。
+每行 JSON 对象需有 `publisher`、`url`、带时区的 `published`、`title`、`body`。Leipzig 的 `publisher` 固定为 `Polizeidirektion Leipzig`，URL 形如 `https://medienservice.sachsen.de/medien/news/1100200`；Bremen 的 `publisher` 固定为 `Polizei Bremen`，URL 是官方分组页面，例如 `https://www.polizei.bremen.de/news/pressestelle/pressemeldungen-ab-11092026-69054`。导入器按输入文件哈希和行号断点续跑，重复导入会检测修订；它无法自行验证人工提供的原文与官方网页相同。Leipzig 通报和 Bremen 原生分组页一律标为多事件来源单元，保持不可发布，也不会从一个页面推断出一个案发点。当前 Leipzig Medienservice 2026 通道及 Bremen 警方署名新闻室通道已完成遍历；任何扫描完成标记都只适用于对应来源渠道，不能证明警方公告全集完整。
 
 Leipzig 的 JSONL 行可再写 `source_file`（相对于 JSONL 的本地 HTML、EML、PDF 或完整 RSS/Atom XML）与该文件的 `source_file_sha256`。入口只读本机字节，不发起网络请求。HTML、邮件和 RSS 的所填正文必须能在文件文字中找到；RSS 若只给摘要，会被拒绝作为完整通报。PDF 只校验签名与字节哈希，`body` 转写必须在逐篇复核时与原 PDF 核对。文件改变会使断点失效并记录新修订，即使转写文字未变。账号、邮箱原件、JSONL 和本地审核输入都只放在 Git 忽略目录。
 
