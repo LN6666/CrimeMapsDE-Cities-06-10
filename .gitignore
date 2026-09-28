@@ -24,5 +24,8 @@ reports/
 *.sqlite-*
 *.db
 *.db-*
+*.jsonl
+*.html
+*.pdf
 *.geojson
 *.pbf
