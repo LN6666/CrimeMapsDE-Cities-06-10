@@ -15,7 +15,7 @@ import re
 import sqlite3
 import time
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -44,7 +44,8 @@ SPEC = SourceSpec("10976", PUBLISHER, ARCHIVE, USER_AGENT)
 ONLINE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sachsen_archive_cursor (
  year INTEGER PRIMARY KEY, next_page INTEGER NOT NULL, pages_scanned INTEGER NOT NULL,
- complete INTEGER NOT NULL, updated REAL NOT NULL
+ complete INTEGER NOT NULL, first_searched TEXT NOT NULL, through_date TEXT NOT NULL,
+ updated REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sachsen_queue (
  id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, first_seen REAL NOT NULL, last_seen REAL NOT NULL,
@@ -85,6 +86,15 @@ def _canonical_digest(article: Article) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _ensure_online_schema(db: sqlite3.Connection) -> None:
+    db.executescript(ONLINE_SCHEMA)
+    existing = {row["name"] for row in db.execute("PRAGMA table_info(sachsen_archive_cursor)")}
+    for name in ("first_searched", "through_date"):
+        if name not in existing:
+            db.execute(f"ALTER TABLE sachsen_archive_cursor ADD COLUMN {name} TEXT")
+    db.commit()
 
 
 def _accept_online(
@@ -198,7 +208,7 @@ def sync_live(
             or not 1 <= limit <= 100 or delay < 4):
         raise ValueError("Use an available year, 1-50 pages, 1-100 articles and delay >= 4 seconds")
     db = connect(db_path)
-    db.executescript(ONLINE_SCHEMA)
+    _ensure_online_schema(db)
     started = time.time()
     stats = {
         "year": year, "archive_pages": 0, "discovered": 0, "new": 0, "revised": 0,
@@ -216,19 +226,33 @@ def sync_live(
             policy = robots_policy(robots_response, SPEC, minimum_delay=delay)
             stats["robots_status"] = policy.status
             last_request = [monotonic()]
-            landing = source_get(
-                session, ARCHIVE, SPEC, policy, last_request, sleeper=sleeper, monotonic=monotonic
-            )
-            snapshot = landing_snapshot(landing.text, str(landing.url), SPEC)
             state = db.execute(
-                "SELECT next_page,pages_scanned,complete FROM sachsen_archive_cursor WHERE year=?",
+                """SELECT next_page,pages_scanned,complete,first_searched,through_date
+                   FROM sachsen_archive_cursor WHERE year=?""",
                 (year,),
             ).fetchone()
-            was_complete = bool(state and state["complete"])
-            page_number = state["next_page"] if state and not was_complete else 1
-            pages_scanned = state["pages_scanned"] if state else 0
-            for _ in range(1 if was_complete else max_pages):
-                url = search_url(SPEC, first_searched=snapshot, year=year, page=page_number)
+            resume = bool(
+                state and not state["complete"] and state["first_searched"]
+                and state["through_date"]
+            )
+            if resume:
+                snapshot = state["first_searched"]
+                through = date.fromisoformat(state["through_date"])
+                page_number = state["next_page"]
+                pages_scanned = state["pages_scanned"]
+            else:
+                landing = source_get(
+                    session, ARCHIVE, SPEC, policy, last_request,
+                    sleeper=sleeper, monotonic=monotonic,
+                )
+                snapshot = landing_snapshot(landing.text, str(landing.url), SPEC)
+                through = min(date(year, 12, 31), datetime.now(UTC).date())
+                page_number = 1
+                pages_scanned = 0
+            for _ in range(max_pages):
+                url = search_url(
+                    SPEC, first_searched=snapshot, year=year, page=page_number, through=through
+                )
                 response = source_get(
                     session, url, SPEC, policy, last_request, sleeper=sleeper, monotonic=monotonic
                 )
@@ -245,16 +269,19 @@ def sync_live(
                 stats["archive_pages"] += 1
                 stats["discovered"] += len(records)
                 pages_scanned += 1
-                if not was_complete:
-                    db.execute(
-                        """INSERT INTO sachsen_archive_cursor(year,next_page,pages_scanned,complete,updated)
-                           VALUES(?,?,?,?,?) ON CONFLICT(year) DO UPDATE SET
-                           next_page=excluded.next_page,pages_scanned=excluded.pages_scanned,
-                           complete=excluded.complete,updated=excluded.updated""",
-                        (year, page_number if terminal else page_number + 1, pages_scanned,
-                         int(terminal), time.time()),
-                    )
-                    db.commit()
+                db.execute(
+                    """INSERT INTO sachsen_archive_cursor
+                       (year,next_page,pages_scanned,complete,first_searched,through_date,updated)
+                       VALUES(?,?,?,?,?,?,?) ON CONFLICT(year) DO UPDATE SET
+                       next_page=excluded.next_page,pages_scanned=excluded.pages_scanned,
+                       complete=excluded.complete,first_searched=excluded.first_searched,
+                       through_date=excluded.through_date,updated=excluded.updated""",
+                    (
+                        year, 1 if terminal else page_number + 1, pages_scanned, int(terminal),
+                        snapshot, through.isoformat(), time.time(),
+                    ),
+                )
+                db.commit()
                 if terminal:
                     break
                 page_number += 1

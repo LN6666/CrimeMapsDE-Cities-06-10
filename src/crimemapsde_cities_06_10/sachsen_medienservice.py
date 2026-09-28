@@ -183,7 +183,7 @@ def robots_policy(response: httpx.Response, spec: SourceSpec, *, minimum_delay: 
 class _PageParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.stack: list[str] = []
+        self.stack: list[tuple[str, frozenset[str]]] = []
         self.links: list[dict] = []
         self._active_link: dict | None = None
         self.canonical: list[str] = []
@@ -193,7 +193,8 @@ class _PageParser(HTMLParser):
         self._script: list[str] | None = None
         self.h1: list[str] = []
         self._h1_depth: int | None = None
-        self.article: list[str] = []
+        self.article_candidates: list[list[str]] = []
+        self._article_candidate: list[str] | None = None
         self.main: list[str] = []
         self.all_text: list[str] = []
         self._article_depth: int | None = None
@@ -204,19 +205,18 @@ class _PageParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs) -> None:
         attrs = {key.casefold(): value or "" for key, value in attrs}
         tag = tag.casefold()
+        classes = frozenset(attrs.get("class", "").casefold().split())
+        inside_content_row = any("content-row" in ancestor_classes
+                                 for _, ancestor_classes in self.stack)
         if tag not in VOID_TAGS:
-            self.stack.append(tag)
+            self.stack.append((tag, classes))
         depth = len(self.stack)
-        classes = set(attrs.get("class", "").casefold().split())
         if tag == "main" and self._main_depth is None:
             self._main_depth = depth
-        if self._article_depth is None and (
-            tag == "article" or classes.intersection(
-                {"article-content", "news-content", "news-detail", "media-detail", "media-content",
-                 "content-col-wide"}
-            )
-        ):
+        if (self._article_depth is None and tag == "div" and "content-col-wide" in classes
+                and inside_content_row):
             self._article_depth = depth
+            self._article_candidate = []
         if tag == "h1" and self._h1_depth is None:
             self._h1_depth = depth
         if tag == "a":
@@ -239,8 +239,8 @@ class _PageParser(HTMLParser):
         if tag == "script" and "ld+json" in attrs.get("type", "").casefold():
             self._script = []
         if tag in BLOCK_TAGS:
-            if self._article_depth is not None:
-                self.article.append("\n")
+            if self._article_candidate is not None:
+                self._article_candidate.append("\n")
             if self._main_depth is not None:
                 self.main.append("\n")
 
@@ -258,8 +258,8 @@ class _PageParser(HTMLParser):
             self._active_link["text"].append(data)
         if self._h1_depth is not None:
             self.h1.append(data)
-        if self._article_depth is not None:
-            self.article.append(data)
+        if self._article_candidate is not None:
+            self._article_candidate.append(data)
         if self._main_depth is not None:
             self.main.append(data)
 
@@ -278,6 +278,9 @@ class _PageParser(HTMLParser):
         if self._h1_depth == depth:
             self._h1_depth = None
         if self._article_depth == depth:
+            if self._article_candidate is not None:
+                self.article_candidates.append(self._article_candidate)
+            self._article_candidate = None
             self._article_depth = None
         if self._main_depth == depth:
             self._main_depth = None
@@ -479,14 +482,26 @@ def article_page(page: str, response_url: str, spec: SourceSpec) -> Article:
     date_candidates.extend(parser.times)
     published = _publication(next((value for value in date_candidates if _clean_text(value)), ""))
 
-    body_candidates = []
-    for item in objects:
-        if isinstance(item.get("articleBody"), str):
-            body_candidates.append(item["articleBody"])
-    body_candidates.extend(("".join(parser.article), "".join(parser.main)))
-    body = next((_body_text(value) for value in body_candidates if len(_body_text(value)) >= 30), "")
-    if not body:
-        raise ValueError("Medienservice full article body extraction failed")
+    subtitles = [_clean_text(value) for key, value in article_meta if key == "subtitle"]
+    subtitles = list(dict.fromkeys(value for value in subtitles if value))
+    if len(subtitles) != 1:
+        raise ValueError("Medienservice article has no unique publication subtitle")
+    marker = subtitles[0]
+    short_marker_match = re.search(r"\bNr\.\s*\d+[|/]\d+\b", marker, re.IGNORECASE)
+    markers = [marker]
+    if short_marker_match:
+        markers.append(short_marker_match[0])
+    candidates = [
+        _body_text(value) for value in ("".join(parts) for parts in parser.article_candidates)
+        if len(_body_text(value)) >= 30
+    ]
+    matching = [
+        candidate for candidate in candidates
+        if any(item.casefold() in candidate.casefold() for item in markers)
+    ]
+    if len(matching) != 1:
+        raise ValueError("Medienservice article body container is missing or ambiguous")
+    body = matching[0]
     return Article(ident, canonical_url, title, published, body)
 
 

@@ -6,7 +6,7 @@ import pytest
 
 from crimemapsde_cities_06_10 import leipzig
 from crimemapsde_cities_06_10.offline_source import probe_robots, review_rows
-from crimemapsde_cities_06_10.sachsen_medienservice import robots_policy
+from crimemapsde_cities_06_10.sachsen_medienservice import article_page, robots_policy
 from crimemapsde_cities_06_10.storage import connect
 
 
@@ -95,18 +95,23 @@ def test_live_robots_200_must_parse_and_allow_required_paths():
         robots_policy(malformed, leipzig.SPEC)
 
 
-def _landing():
+def _landing(snapshot="2026-09-28 17:59:06 UTC"):
     return """<html><body>Polizeidirektion Leipzig
-    <input value="2026-09-28 17:59:06 UTC" type="hidden"
-     name="search[first_searched]" id="search_first_searched" /></body></html>"""
+    <input value="SNAPSHOT" type="hidden"
+     name="search[first_searched]" id="search_first_searched" /></body></html>""".replace(
+        "SNAPSHOT", snapshot
+    )
 
 
-def _article(ident="1100200", publisher="Polizeidirektion Leipzig", token="one"):
+def _article(
+    ident="1100200", publisher="Polizeidirektion Leipzig", token="one", *, ambiguous=False
+):
     return f"""<html><head><meta name="date" content="2019-01-01" />
     <meta name="author" content="Referat Kommunikation" />
     <meta name="id" content="{ident}" />
     <meta name="url" content="{leipzig.ORIGIN}/medien/news/{ident}" />
     <meta name="title" content="Mehrere Meldungen" />
+    <meta name="subtitle" content="Medieninformation Nr. 341|26" />
     <meta name="date" content="28.09.2026 15:21" />
     <meta name="author" content="{publisher}" />
     <meta name="csrf-token" content="{token}" /></head><body>
@@ -115,13 +120,16 @@ def _article(ident="1100200", publisher="Polizeidirektion Leipzig", token="one")
     <div class="col"><h3>Erster Sachverhalt</h3><p>Ort: Leipzig<br />Zeit: Sonntag</p>
     <p>Ein vollständiger synthetischer Polizeibericht für die Quellenprüfung.</p></div></div></div>
     <div class="content-col-small">Kontakt und Navigation, die nicht zum Bericht gehören.</div>
-    </div></body></html>"""
+    </div><div class="row content-row"><div class="content-col-wide">
+    <h2>{'Medieninformation Nr. 341|26' if ambiguous else 'Behörden und Themen'}</h2>
+    <p>Behörden und Themen Navigation aus dem globalen Seitenfuß.</p>
+    </div></div></body></html>"""
 
 
-def _search_payload(*idents):
+def _search_payload(*idents, disable=True):
     return json.dumps({
         "teaser": [f'<div><a href="/medien/news/{ident}">Meldung {ident}</a></div>' for ident in idents],
-        "disable": True,
+        "disable": disable,
         "up_to_date": True,
     }).encode()
 
@@ -154,6 +162,7 @@ def test_live_sync_uses_public_search_checkpoint_and_canonical_source_hash(tmp_p
         provenance = db.execute("SELECT * FROM sachsen_source_units").fetchone()
         assert report["id"] == "1100200" and report["revision"] == 1
         assert "Kontakt und Navigation" not in report["body"]
+        assert "Behörden und Themen Navigation" not in report["body"]
         assert hashlib.sha256(report["body"].encode()).hexdigest() == report["sha256"]
         assert provenance["publisher"] == leipzig.PUBLISHER
         assert provenance["institution_id"] == "10976" and provenance["source_verified"] == 1
@@ -190,6 +199,101 @@ def test_first_bad_article_stops_and_persists_queue_error(tmp_path):
     with connect(db_path) as db:
         failed = db.execute("SELECT * FROM sachsen_queue WHERE id='1100201'").fetchone()
         assert failed["failures"] == 1 and "publisher mismatch" in failed["error"]
+
+
+def test_real_article_structure_excludes_global_wide_navigation_and_rejects_ambiguity():
+    parsed = article_page(
+        _article(), f"{leipzig.ORIGIN}/medien/news/1100200", leipzig.SPEC
+    )
+    assert "Erster Sachverhalt" in parsed.body
+    assert "Behörden und Themen Navigation" not in parsed.body
+    with pytest.raises(ValueError, match="ambiguous"):
+        article_page(
+            _article(ambiguous=True),
+            f"{leipzig.ORIGIN}/medien/news/1100200",
+            leipzig.SPEC,
+        )
+
+
+def test_archive_resume_reuses_snapshot_and_completed_scan_restarts_page_one(tmp_path):
+    landing_calls = 0
+    searches = []
+
+    def handler(request):
+        nonlocal landing_calls
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404, request=request)
+        if request.url.path == "/medien/":
+            landing_calls += 1
+            token = "snapshot-a" if landing_calls == 1 else "snapshot-b"
+            return httpx.Response(200, request=request, text=_landing(token))
+        if request.url.path == "/medien/news/search.json":
+            page = int(request.url.params["page"])
+            snapshot = request.url.params["search[first_searched]"]
+            searches.append((page, snapshot))
+            if (page, snapshot) == (1, "snapshot-a"):
+                return httpx.Response(
+                    200, request=request, content=_search_payload("1100200", disable=False)
+                )
+            if (page, snapshot) == (2, "snapshot-a"):
+                return httpx.Response(200, request=request, content=_search_payload("1100199"))
+            if (page, snapshot) == (1, "snapshot-b"):
+                return httpx.Response(200, request=request, content=_search_payload("1100200"))
+            raise AssertionError((page, snapshot))
+        if request.url.path.startswith("/medien/news/"):
+            return httpx.Response(
+                200, request=request, text=_article(request.url.path.rsplit("/", 1)[1])
+            )
+        raise AssertionError(request.url)
+
+    path = tmp_path / "resume.sqlite"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        first = leipzig.sync_live(
+            path, 2026, max_pages=1, limit=1, client=client, sleeper=lambda _seconds: None
+        )
+        second = leipzig.sync_live(
+            path, 2026, max_pages=1, limit=1, client=client, sleeper=lambda _seconds: None
+        )
+        third = leipzig.sync_live(
+            path, 2026, max_pages=1, limit=1, client=client, sleeper=lambda _seconds: None
+        )
+    assert first["next_page"] == 2 and not first["archive_complete"]
+    assert second["archive_complete"] and second["next_page"] == 1
+    assert third["archive_complete"] and third["pages_scanned"] == 1
+    assert searches == [(1, "snapshot-a"), (2, "snapshot-a"), (1, "snapshot-b")]
+    assert landing_calls == 2
+
+
+def test_offline_import_replaces_online_provenance_for_same_id(tmp_path):
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404, request=request)
+        if request.url.path == "/medien/":
+            return httpx.Response(200, request=request, text=_landing())
+        if request.url.path == "/medien/news/search.json":
+            return httpx.Response(200, request=request, content=_search_payload("1100200"))
+        if request.url.path == "/medien/news/1100200":
+            return httpx.Response(200, request=request, text=_article())
+        raise AssertionError(request.url)
+
+    path = tmp_path / "provenance.sqlite"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert leipzig.sync_live(
+            path, 2026, client=client, sleeper=lambda _seconds: None
+        )["new"] == 1
+    manifest = tmp_path / "manual.jsonl"
+    manifest.write_text(json.dumps(bulletin(
+        "1100200", "Ort: Leipzig. Ein manuell gespeicherter vollständiger Quellenbericht."
+    )) + "\n")
+    assert leipzig.sync_offline(path, manifest)["revised"] == 1
+    with connect(path) as db:
+        assert db.execute("SELECT count(*) FROM sachsen_source_units").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM offline_source_units WHERE id='1100200'").fetchone()[0] == 1
+    rows = review_rows(
+        path, publisher=leipzig.PUBLISHER, host="medienservice.sachsen.de",
+        article_path=leipzig.ARTICLE_PATH,
+    )
+    assert len(rows) == 1 and rows[0]["source_verified"] is False
 
 
 def test_saved_html_file_hash_and_full_text_gate_review(tmp_path):

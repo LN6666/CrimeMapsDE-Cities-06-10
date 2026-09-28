@@ -157,6 +157,10 @@ def ingest_jsonl(
                    manually_supplied=1,publication_eligible=0""",
                 (ident, publisher, record_type),
             )
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sachsen_source_units'"
+            ).fetchone():
+                db.execute("DELETE FROM sachsen_source_units WHERE id=?", (ident,))
             db.execute(
                 """INSERT INTO offline_file_cursors(path,sha256,next_line,updated)
                    VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET sha256=excluded.sha256,
