@@ -55,6 +55,19 @@ def test_article_body_requires_matching_police_publisher_and_omits_contacts():
         article_body(ARTICLE.replace("Polizei Düsseldorf</a>", "Anderer Herausgeber</a>"))
 
 
+def test_article_body_preserves_preformatted_source_lists():
+    page = ARTICLE.replace(
+        "<p>Zeuginnen und Zeugen werden gesucht.</p>",
+        "<pre>Bilanz:\n1. Verstoß gegen das Versammlungsgesetz\n"
+        "2. Drei weitere Strafanzeigen</pre>"
+        "<p>Zeuginnen und Zeugen werden gesucht.</p>",
+    )
+    body = article_body(page)
+    assert "Bilanz: 1. Verstoß gegen das Versammlungsgesetz" in body
+    assert "2. Drei weitere Strafanzeigen" in body
+    assert "Am Polizeipräsidium" not in body
+
+
 def test_city_export_requires_current_source_bound_city_decision(tmp_path):
     db = connect(tmp_path / "police.sqlite")
     local, outside = listing_rows(LISTING)

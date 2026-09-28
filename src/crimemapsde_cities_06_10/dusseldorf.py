@@ -95,6 +95,7 @@ class ArticleParser(HTMLParser):
         self.customer = ""
         self.parts = []
         self.current = []
+        self.block_tag = None
 
     def handle_starttag(self, tag, attrs):
         classes = dict(attrs).get("class", "").split()
@@ -108,6 +109,11 @@ class ArticleParser(HTMLParser):
             elif not self.stopped:
                 self.in_paragraph = True
                 self.current = []
+                self.block_tag = tag
+        elif self.in_story and self.after_heading and tag == "pre" and not self.stopped:
+            self.in_paragraph = True
+            self.current = []
+            self.block_tag = tag
 
     def handle_data(self, data):
         if self.in_customer:
@@ -122,11 +128,18 @@ class ArticleParser(HTMLParser):
             self.after_heading = True
         elif tag == "p":
             self.in_customer = False
-            if self.in_paragraph:
+            if self.in_paragraph and self.block_tag == tag:
                 paragraph = " ".join(" ".join(self.current).split())
                 if paragraph and not paragraph.startswith("Schneller informiert:"):
                     self.parts.append(paragraph)
                 self.in_paragraph = False
+                self.block_tag = None
+        elif tag == "pre" and self.in_paragraph and self.block_tag == tag:
+            paragraph = " ".join(" ".join(self.current).split())
+            if paragraph:
+                self.parts.append(paragraph)
+            self.in_paragraph = False
+            self.block_tag = None
         elif tag == "article":
             self.in_story = False
 
