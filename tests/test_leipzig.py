@@ -1,10 +1,11 @@
+import hashlib
 import json
 
 import httpx
 import pytest
 
 from crimemapsde_cities_06_10 import leipzig
-from crimemapsde_cities_06_10.offline_source import probe_robots
+from crimemapsde_cities_06_10.offline_source import probe_robots, review_rows
 from crimemapsde_cities_06_10.storage import connect
 
 
@@ -64,3 +65,48 @@ def test_leipzig_robots_and_official_identity_fail_closed(tmp_path):
     input_file.write_text(json.dumps(row) + "\n")
     with pytest.raises(ValueError, match="publisher"):
         leipzig.sync_offline(tmp_path / "wrong.sqlite", input_file)
+
+
+def test_saved_html_file_hash_and_full_text_gate_review(tmp_path):
+    body = "Ort: Leipzig. Dies ist ein längerer synthetischer Bericht über zwei getrennte Vorfälle."
+    saved = tmp_path / "saved.html"
+    saved.write_text(f"<html><article>{body}</article></html>")
+    record = bulletin("1100200", body)
+    record.update(source_file="saved.html", source_file_sha256=hashlib.sha256(saved.read_bytes()).hexdigest())
+    manifest = tmp_path / "official.jsonl"
+    manifest.write_text(json.dumps(record) + "\n")
+    db_path = tmp_path / "leipzig.sqlite"
+    assert leipzig.sync_offline(db_path, manifest)["new"] == 1
+    rows = review_rows(
+        db_path, publisher=leipzig.PUBLISHER, host="medienservice.sachsen.de",
+        article_path=leipzig.ARTICLE_PATH,
+    )
+    assert len(rows) == 1
+    assert rows[0]["source_file_sha256"] == record["source_file_sha256"]
+    assert rows[0]["source_file_text_matches"] is True
+    assert rows[0]["source_verified"] is False and rows[0]["publication_ready"] is False
+    saved.write_text(saved.read_text() + "<!-- changed -->")
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        review_rows(db_path, publisher=leipzig.PUBLISHER, host="medienservice.sachsen.de",
+                    article_path=leipzig.ARTICLE_PATH)
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        leipzig.sync_offline(db_path, manifest)  # completed cursor must not skip a changed source file
+
+
+def test_pdf_transcription_change_revises_even_when_body_is_same(tmp_path):
+    body = "Ort: Leipzig. Ein vollständiger synthetischer Quellenbericht zu einem lokalen Vorfall."
+    pdf = tmp_path / "saved.pdf"
+    pdf.write_bytes(b"%PDF-1.4\nfirst synthetic fixture\n%%EOF")
+    record = bulletin("1100200", body)
+    record.update(source_file="saved.pdf", source_file_sha256=hashlib.sha256(pdf.read_bytes()).hexdigest())
+    manifest = tmp_path / "official.jsonl"
+    manifest.write_text(json.dumps(record) + "\n")
+    db_path = tmp_path / "leipzig.sqlite"
+    assert leipzig.sync_offline(db_path, manifest)["new"] == 1
+    pdf.write_bytes(b"%PDF-1.4\nsecond synthetic fixture\n%%EOF")
+    record["source_file_sha256"] = hashlib.sha256(pdf.read_bytes()).hexdigest()
+    manifest.write_text(json.dumps(record) + "\n")
+    assert leipzig.sync_offline(db_path, manifest)["revised"] == 1
+    rows = review_rows(db_path, publisher=leipzig.PUBLISHER, host="medienservice.sachsen.de",
+                       article_path=leipzig.ARTICLE_PATH)
+    assert rows[0]["revision"] == 2 and rows[0]["source_file_text_matches"] is False

@@ -59,6 +59,16 @@ uv run python -m crimemapsde_cities_06_10.bremen --input .runtime/cities/bremen/
 
 每行 JSON 对象需有 `publisher`、`url`、带时区的 `published`、`title`、`body`。Leipzig 的 `publisher` 固定为 `Polizeidirektion Leipzig`，URL 形如 `https://medienservice.sachsen.de/medien/news/1100200`；Bremen 的 `publisher` 固定为 `Polizei Bremen`，URL 是官方分组页面，例如 `https://www.polizei.bremen.de/news/pressestelle/pressemeldungen-ab-11092026-69054`。导入器按输入文件哈希和行号断点续跑，重复导入会检测修订；它无法自行验证人工提供的原文与官方网页相同。Leipzig 通报和 Bremen 原生分组页一律标为多事件来源单元，保持不可发布，也不会从一个页面推断出一个案发点。两城历史覆盖仍不完整；任何扫描完成标记都只适用于对应来源渠道，不能证明警方公告全集完整。
 
+Leipzig 的 JSONL 行可再写 `source_file`（相对于 JSONL 的本地 HTML、EML、PDF 或完整 RSS/Atom XML）与该文件的 `source_file_sha256`。入口只读本机字节，不自动访问受阻来源。HTML、邮件和 RSS 的所填正文必须能在文件文字中找到；RSS 若只给摘要，会被拒绝作为完整通报。PDF 只校验签名与字节哈希，`body` 转写必须在逐篇复核时与原 PDF 核对。文件改变会使断点失效并记录新修订，即使转写文字未变。账号、邮箱原件、JSONL 和本地审核输入都只放在 Git 忽略目录。
+
+```sh
+uv run python -m crimemapsde_cities_06_10.leipzig \
+  --db .runtime/cities/leipzig/police.sqlite \
+  --export-review .runtime/cities/leipzig/review-input.ndjson --limit 100
+```
+
+只读导出重算正文、修订和原文件哈希，输出整篇通报及来源元数据供 Codex 先读原文、再拆独立案件和所有场景；它不自动给出可定位候选。后续批次可用 `--review-offset` 分页并写不同的本地输出文件。导出中的 `source_verified`、`publication_ready` 始终为 `false`，来源身份、覆盖与市域还需人工核查。
+
 原文数据库、运行档案、下载材料、账户凭据和生成城市数据均由 `.gitignore` 排除，不进入 Git。CI 只用合成输入运行测试和静态检查，不抓取网站。
 
 代码采用 Apache-2.0 许可证，见 [LICENSE](LICENSE)。

@@ -27,5 +27,7 @@ reports/
 *.jsonl
 *.html
 *.pdf
+*.eml
+*.xml
 *.geojson
 *.pbf
