@@ -197,24 +197,9 @@ def _get(client, robots, url: str, last_request: list[float], delay: float, head
             raise ValueError("Unexpected Dortmund source path")
         if not robots.can_fetch(USER_AGENT, url):
             raise ValueError("robots.txt disallows " + url)
-        for attempt in range(3):
-            time.sleep(max(0, delay - (time.monotonic() - last_request[0])))
-            last_request[0] = time.monotonic()
-            try:
-                response = client.get(url, headers=headers)
-            except httpx.TransportError:
-                if attempt == 2:
-                    raise
-                time.sleep(2**attempt)
-                continue
-            if response.status_code in {429, 500, 502, 503, 504}:
-                if attempt == 2:
-                    response.raise_for_status()
-                retry_after = response.headers.get("retry-after", "")
-                wait = int(retry_after) if retry_after.isdigit() else 2**attempt
-                time.sleep(min(30, max(delay, wait)))
-                continue
-            break
+        time.sleep(max(0, delay - (time.monotonic() - last_request[0])))
+        last_request[0] = time.monotonic()
+        response = client.get(url, headers=headers)
         if response.status_code in {301, 302, 303, 307, 308}:
             target = urljoin(str(response.url), response.headers["location"])
             if urlparse(target).path != parsed.path:
@@ -248,15 +233,8 @@ def sync(path: str | Path, year: int, *, pages: int = 1, limit: int = 5, delay: 
     db.commit()
     try:
         with httpx.Client(timeout=25, follow_redirects=False, headers={"User-Agent": USER_AGENT}) as client:
-            for attempt in range(3):
-                try:
-                    response = client.get(ORIGIN + "/robots.txt")
-                    response.raise_for_status()
-                    break
-                except (httpx.TransportError, httpx.HTTPStatusError):
-                    if attempt == 2:
-                        raise
-                    time.sleep(2**attempt)
+            response = client.get(ORIGIN + "/robots.txt")
+            response.raise_for_status()
             if response.status_code != 200 or str(response.url) != ORIGIN + "/robots.txt":
                 raise ValueError("Unexpected Dortmund robots.txt response")
             robots = source_robots(response.text)
@@ -358,9 +336,15 @@ def sync(path: str | Path, year: int, *, pages: int = 1, limit: int = 5, delay: 
                         db.commit()
                     stats[result] += 1
                 except (httpx.HTTPError, ValueError) as exc:
+                    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                     fail(db, row["id"], f"{type(exc).__name__}: {exc}", time.time(),
-                         exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None)
+                         status)
                     stats["failed"] += 1
+                    stats["stopped_on_source_error"] = {
+                        "source_id": row["id"], "http_status": status,
+                        "error_type": type(exc).__name__,
+                    }
+                    break
             bounds = (f"{year}-01-01", f"{year + 1}-01-01")
             stats["stored"] = db.execute(
                 "SELECT count(*) FROM reports WHERE published>=? AND published<? AND body IS NOT NULL", bounds

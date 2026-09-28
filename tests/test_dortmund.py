@@ -118,16 +118,88 @@ def test_bounded_native_archive_resumes_and_retains_node_id(tmp_path, monkeypatc
     db.close()
 
 
-def test_source_get_retries_temporary_response_without_leaving_origin(monkeypatch):
+@pytest.mark.parametrize("status", [429, 503])
+def test_source_get_stops_on_first_temporary_response(monkeypatch, status):
     calls = []
 
     def handler(request):
         calls.append(str(request.url))
-        return httpx.Response(503 if len(calls) == 1 else 200, text="ready")
+        return httpx.Response(status, text="unavailable")
 
     monkeypatch.setattr(dortmund.time, "sleep", lambda _: None)
     robots = dortmund.source_robots("User-agent: *\nDisallow: /admin/\n")
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = dortmund._get(client, robots, dortmund.ARCHIVE, [0], 1)
-    assert result.text == "ready"
-    assert calls == [dortmund.ARCHIVE, dortmund.ARCHIVE]
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client, pytest.raises(httpx.HTTPStatusError):
+        dortmund._get(client, robots, dortmund.ARCHIVE, [0], 1)
+    assert calls == [dortmund.ARCHIVE]
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("target", ["robots", "listing"])
+def test_sync_stops_on_first_source_status(tmp_path, monkeypatch, status, target):
+    requested = []
+
+    def handler(request):
+        requested.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(
+                status if target == "robots" else 200,
+                text="User-agent: *\nDisallow: /admin/\n",
+            )
+        return httpx.Response(status, text="unavailable")
+
+    real_client = httpx.Client
+    monkeypatch.setattr(dortmund.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(dortmund.time, "sleep", lambda _: None)
+    with pytest.raises(httpx.HTTPStatusError):
+        dortmund.sync(tmp_path / "stopped.sqlite", 2026)
+    assert requested == (
+        [dortmund.ORIGIN + "/robots.txt"]
+        if target == "robots" else [dortmund.ORIGIN + "/robots.txt", dortmund.ARCHIVE]
+    )
+
+
+@pytest.mark.parametrize("status", [429, 503, 200])
+def test_article_error_stops_batch_and_leaves_later_article_pending(tmp_path, monkeypatch, status):
+    requested = []
+    first_url = dortmund.ORIGIN + "/presse/erster-fall"
+    second_url = dortmund.ORIGIN + "/presse/zweiter-fall"
+    head = listing([
+        ("erster-fall", "2026-09-27T10:10:15+02:00", "Lfd. Nr.: 0805", "Polizei Dortmund"),
+        ("zweiter-fall", "2026-09-26T10:10:15+02:00", "Lfd. Nr.: 0804", "Polizei Dortmund"),
+    ])
+
+    def handler(request):
+        requested.append(str(request.url))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /admin/\n")
+        if request.url.path == "/presse/pressemitteilungen":
+            return httpx.Response(200, text=head)
+        if request.url.path == "/presse/erster-fall":
+            return httpx.Response(
+                status,
+                text=article(author="Polizei Hamm") if status == 200 else "unavailable",
+            )
+        if request.url.path == "/presse/zweiter-fall":
+            return httpx.Response(200, text=article())
+        raise AssertionError(request.url)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(dortmund.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(dortmund.time, "sleep", lambda _: None)
+    path = tmp_path / "articles.sqlite"
+    result = dortmund.sync(path, 2026, limit=2)
+    assert result["failed"] == 1 and result["pending"] == 2
+    assert result["stopped_on_source_error"] == {
+        "source_id": "erster-fall",
+        "http_status": None if status == 200 else status,
+        "error_type": "ValueError" if status == 200 else "HTTPStatusError",
+    }
+    assert requested.count(first_url) == 1
+    assert second_url not in requested
+    db = connect(path)
+    first = db.execute("SELECT body,http_status,failures,error FROM reports WHERE id='erster-fall'").fetchone()
+    second = db.execute("SELECT body,error FROM reports WHERE id='zweiter-fall'").fetchone()
+    assert first["body"] is None and first["http_status"] == result["stopped_on_source_error"]["http_status"]
+    assert first["failures"] == 1 and first["error"]
+    assert second["body"] is None and second["error"] is None
+    db.close()
