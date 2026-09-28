@@ -8,7 +8,7 @@
 | Stuttgart | 警方署名新闻室采集；列表地域仅作审核线索 | [Polizeipräsidium Stuttgart 新闻室](https://www.presseportal.de/blaulicht/nr/110977) |
 | Leipzig | 官方材料本地暂存；网站 robots.txt 当前返回 404，自动采集关闭 | [萨克森警方档案](https://www.polizei.sachsen.de/de/111350.htm) → [官方 Medienservice](https://medienservice.sachsen.de/medien/?search%5Binstitution_ids%5D%5B%5D=10976) |
 | Dortmund | 官方原生档案有界采集、断点与市域审核门禁 | [Polizei Dortmund 原生档案](https://dortmund.polizei.nrw/presse/pressemitteilungen) |
-| Bremen | 官方分组档案页本地暂存；网站 robots.txt 当前为空，自动采集关闭 | [Polizei Bremen 原生档案](https://www.polizei.bremen.de/news/pressestelle/pressearchiv-5034) |
+| Bremen | 警方署名 Presseportal 新闻室可逐篇断点采集；原生分组档案因空 robots.txt 只作人工补充 | [Polizei Bremen 新闻室](https://www.presseportal.de/blaulicht/nr/35235) / [原生档案](https://www.polizei.bremen.de/news/pressestelle/pressearchiv-5034) |
 
 警方新闻室和警察分局档案可以含市外、高速公路和多事件公告；发布机构或列表地域不证明案发地点在目标城市。尤其 Dortmund 的原生档案含市外调查，Leipzig 的同一媒体通报可同时列出市内及周边县案件，Bremen 的一个档案页面可合并多篇公告。采集数据仅在本地暂存，必须逐篇核对原文、定位与市域范围，再经项目所有者检查和确认，才能考虑生成新地图。公告也不是完整报案清单或一篇对应一宗犯罪。
 
@@ -26,9 +26,10 @@ uv run ruff check src tests
 uv run python -m crimemapsde_cities_06_10.dusseldorf --year 2026 --full --max-pages 2 --limit 5
 uv run python -m crimemapsde_cities_06_10.stuttgart --year 2026 --pages 2 --limit 5
 uv run python -m crimemapsde_cities_06_10.dortmund --year 2026 --pages 1 --limit 1
+uv run python -m crimemapsde_cities_06_10.bremen --year 2026 --full --max-pages 2 --limit 5
 ```
 
-默认检查点位于 `.runtime/cities/<城市模块名>/police.sqlite`。断点重跑保留来源文章 ID、URL、发布时间、原文、修订哈希及失败状态。自动采集前检查 `robots.txt`，按最少一秒间隔请求；来源不可用或解析失败时保留已有记录。Dortmund 记录列表 URL 标识和文章原生 Drupal 节点 ID；列表里的警方编号只是溯源字段。
+默认检查点位于 `.runtime/cities/<城市模块名>/police.sqlite`。断点重跑保留来源文章 ID、URL、发布时间、原文、修订哈希及失败状态。自动采集前检查 `robots.txt`，按最少一秒间隔请求；来源不可用或解析失败时保留已有记录。Bremen 自动路径只请求警方署名的 Presseportal 单篇公告，不请求 robots 规则为空的原生分组档案。Dortmund 记录列表 URL 标识和文章原生 Drupal 节点 ID；列表里的警方编号只是溯源字段。
 
 Düsseldorf 和 Dortmund 的市域结论必须引用当前原文，修订后旧结论失效；Stuttgart 的列表地域只存为待审核线索。此仓库没有地理编码、逐篇内容复核与所有者发布批准的完整流程，因而任何本地记录都不构成可发布地图。
 
@@ -45,18 +46,18 @@ uv run python -m crimemapsde_cities_06_10.source_audit --city dortmund \
 
 省略 `--out` 时写到标准输出；可用 `--db` 指定本地数据库。`schema_version: 1` 的清单包含 `city`、`readiness`、`checkpoint_scans`、`counts`、`records` 和 `location_candidates`。每条记录保留来源 ID、URL、日期、原文 SHA-256、修订号、市域结论及审核状态。Dortmund 另保留原生节点 ID 和警方编号。导出过程只读取数据库，不写入或修改检查点；JSON **不包含原文或市域证据引文**。导出文件应放在 `.runtime/` 等 Git 忽略目录，不能提交或上传。
 
-`location_candidates` 只是供后续逐篇定位审核的来源引用，没有坐标。必须有匹配城市官方来源格式的 URL/ID、带时区的日期、当前原文与匹配哈希、有效修订号和与该哈希绑定的市域证据，才可能出现于该列表。Stuttgart 的列表地域不算市域证据；Leipzig 通报和 Bremen 分组页是人工提供的多事件单元，即使后来有市域标注，也不产生定位候选。清单内文章复核状态当前一律为 `pending`，所有者仍需检查并批准。五城清单的 `archive_complete`、`source_verified`、`publication_ready` 均明确为 `false`，`blocking_reasons` 列出原因；扫描断点完成不等于档案完整。
+`location_candidates` 只是供后续逐篇定位审核的来源引用，没有坐标。必须有匹配城市官方来源格式的 URL/ID、带时区的日期、当前原文与匹配哈希、有效修订号和与该哈希绑定的市域证据，才可能出现于该列表。Stuttgart 的列表地域不算市域证据；Leipzig 通报和人工补入的 Bremen 原生分组页是多事件单元，即使后来有市域标注，也不产生定位候选。Bremen 新闻室里的单篇公告仍需当前正文绑定的市域审核。清单内文章复核状态当前一律为 `pending`，所有者仍需检查并批准。五城清单的 `archive_complete`、`source_verified`、`publication_ready` 均明确为 `false`，`blocking_reasons` 列出原因；扫描断点完成不等于档案完整。
 
-## Leipzig 和 Bremen 的离线入口
+## Leipzig 离线入口与 Bremen 原生档案补充
 
-两城的官方档案仍可供人在浏览器中查阅，但本程序当前无法验证其 robots 规则，因此**不会自动请求档案或文章**。可以将已人工核对的官方材料存为 Git 忽略目录中的 JSONL，再限量导入本地库：
+Leipzig 的官方档案仍可供人在浏览器中查阅，但本程序当前无法验证其 robots 规则，因此不会自动请求档案或文章。Bremen 的原生档案 robots.txt 为空，也不自动请求；自动采集改用警方署名的 Presseportal 单篇新闻室。两类已人工核对的官方材料仍可存为 Git 忽略目录中的 JSONL，再限量导入本地库：
 
 ```sh
 uv run python -m crimemapsde_cities_06_10.leipzig --input .runtime/cities/leipzig/import.jsonl --limit 10
 uv run python -m crimemapsde_cities_06_10.bremen --input .runtime/cities/bremen/import.jsonl --limit 10
 ```
 
-每行 JSON 对象需有 `publisher`、`url`、带时区的 `published`、`title`、`body`。Leipzig 的 `publisher` 固定为 `Polizeidirektion Leipzig`，URL 形如 `https://medienservice.sachsen.de/medien/news/1100200`；Bremen 的 `publisher` 固定为 `Polizei Bremen`，URL 是官方分组页面，例如 `https://www.polizei.bremen.de/news/pressestelle/pressemeldungen-ab-11092026-69054`。导入器按输入文件哈希和行号断点续跑，重复导入会检测修订；它无法自行验证人工提供的原文与官方网页相同。Leipzig 通报和 Bremen 分组页一律标为多事件来源单元，保持不可发布，也不会从一个页面推断出一个案发点。两城历史覆盖仍不完整。网站 robots 恢复前不启用在线爬取。
+每行 JSON 对象需有 `publisher`、`url`、带时区的 `published`、`title`、`body`。Leipzig 的 `publisher` 固定为 `Polizeidirektion Leipzig`，URL 形如 `https://medienservice.sachsen.de/medien/news/1100200`；Bremen 的 `publisher` 固定为 `Polizei Bremen`，URL 是官方分组页面，例如 `https://www.polizei.bremen.de/news/pressestelle/pressemeldungen-ab-11092026-69054`。导入器按输入文件哈希和行号断点续跑，重复导入会检测修订；它无法自行验证人工提供的原文与官方网页相同。Leipzig 通报和 Bremen 原生分组页一律标为多事件来源单元，保持不可发布，也不会从一个页面推断出一个案发点。两城历史覆盖仍不完整；任何扫描完成标记都只适用于对应来源渠道，不能证明警方公告全集完整。
 
 原文数据库、运行档案、下载材料、账户凭据和生成城市数据均由 `.gitignore` 排除，不进入 Git。CI 只用合成输入运行测试和静态检查，不抓取网站。
 

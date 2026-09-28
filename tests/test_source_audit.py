@@ -105,6 +105,24 @@ def test_stuttgart_listing_lead_is_not_city_scope_and_audit_is_read_only(tmp_pat
     db.close()
 
 
+def test_bremen_newsroom_article_can_enter_review_candidates_but_not_publication(tmp_path):
+    path = tmp_path / "bremen.sqlite"
+    db = connect(path)
+    add_report(
+        db,
+        "6359801",
+        url="https://www.presseportal.de/blaulicht/pm/35235/6359801",
+    )
+    record_city_scope(db, "6359801", "in_city", EVIDENCE, 3)
+    db.close()
+    result = audit_source("bremen", path)
+    assert result["counts"] == {"source_records": 1, "location_candidates": 1}
+    assert result["records"][0]["manually_supplied"] is False
+    assert result["records"][0]["source_record_type"] == "single_article"
+    assert "automatic_source_access_blocked" not in result["readiness"]["blocking_reasons"]
+    assert result["readiness"]["publication_ready"] is False
+
+
 @pytest.mark.parametrize("city,record_type", [
     ("leipzig", "multi_event_bulletin"), ("bremen", "multi_announcement_archive_page"),
 ])
@@ -130,7 +148,11 @@ def test_offline_units_cannot_become_location_candidates(tmp_path, city, record_
     assert result["records"][0]["source_unit_publication_eligible"] is False
     assert result["records"][0]["location_candidate"] is False
     assert result["location_candidates"] == []
-    assert "automatic_source_access_blocked" in result["readiness"]["blocking_reasons"]
+    if city == "leipzig":
+        assert "automatic_source_access_blocked" in result["readiness"]["blocking_reasons"]
+    else:
+        assert "automatic_source_access_blocked" not in result["readiness"]["blocking_reasons"]
+        assert "manual_source_authenticity_unverified" in result["readiness"]["blocking_reasons"]
 
 
 def test_wrong_source_url_cannot_become_candidate(tmp_path):

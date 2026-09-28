@@ -15,31 +15,37 @@ from urllib.parse import urlparse
 from .registry import CITIES
 
 SCHEMA_VERSION = 1
-OFFLINE_CITIES = frozenset({"leipzig", "bremen"})
+OFFLINE_CITIES = frozenset({"leipzig"})
 ARTICLE_ORIGINS = {
-    "dusseldorf": ("www.presseportal.de", re.compile(r"/blaulicht/pm/13248/(\d+)$")),
-    "stuttgart": ("www.presseportal.de", re.compile(r"/blaulicht/pm/110977/(\d+)$")),
-    "leipzig": ("medienservice.sachsen.de", re.compile(r"/medien/news/(\d+)$")),
-    "dortmund": ("dortmund.polizei.nrw", re.compile(r"/presse/([a-z0-9][a-z0-9-]+)$")),
-    "bremen": ("www.polizei.bremen.de", re.compile(
-        r"/news/pressestelle/pressemeldungen-ab-[a-z0-9-]+-(\d+)$"
-    )),
+    "dusseldorf": (("www.presseportal.de", re.compile(r"/blaulicht/pm/13248/(\d+)$")),),
+    "stuttgart": (("www.presseportal.de", re.compile(r"/blaulicht/pm/110977/(\d+)$")),),
+    "leipzig": (("medienservice.sachsen.de", re.compile(r"/medien/news/(\d+)$")),),
+    "dortmund": (("dortmund.polizei.nrw", re.compile(r"/presse/([a-z0-9][a-z0-9-]+)$")),),
+    "bremen": (
+        ("www.presseportal.de", re.compile(r"/blaulicht/pm/35235/(\d+)$")),
+        ("www.polizei.bremen.de", re.compile(
+            r"/news/pressestelle/pressemeldungen-ab-[a-z0-9-]+-(\d+)$"
+        )),
+    ),
 }
 
 
 def _source_identity_valid(city: str, ident: str, url: str) -> bool:
     if not isinstance(ident, str) or not isinstance(url, str):
         return False
-    host, pattern = ARTICLE_ORIGINS[city]
     try:
         parsed = urlparse(url)
     except ValueError:
         return False
     if city == "dortmund" and parsed.path == "/presse/pressemitteilungen":
         return False
-    match = pattern.fullmatch(parsed.path)
-    return bool(parsed.scheme == "https" and parsed.netloc == host and not parsed.query
-                and not parsed.fragment and match and match[1] == ident)
+    if parsed.scheme != "https" or parsed.query or parsed.fragment:
+        return False
+    for host, pattern in ARTICLE_ORIGINS[city]:
+        match = pattern.fullmatch(parsed.path)
+        if parsed.netloc == host and match and match[1] == ident:
+            return True
+    return False
 
 
 def _source_date_valid(value: str) -> bool:
@@ -85,7 +91,8 @@ def _dortmund_ids(db: sqlite3.Connection) -> dict[str, sqlite3.Row]:
 def _checkpoint_scans(db: sqlite3.Connection, city: str) -> list[dict]:
     table = {"dusseldorf": "dusseldorf_archive_cursor",
              "stuttgart": "stuttgart_archive_cursor",
-             "dortmund": "dortmund_archive_cursor"}.get(city)
+             "dortmund": "dortmund_archive_cursor",
+             "bremen": "bremen_archive_cursor"}.get(city)
     if table is None or not _has_table(db, table):
         return []
     complete = "historical_scan_complete" if city == "stuttgart" else "complete"
@@ -118,7 +125,7 @@ def _record(row: sqlite3.Row, *, city: str, scope: sqlite3.Row | None,
     record_type = offline["record_type"] if offline else (
         "unknown_offline_unit" if city in OFFLINE_CITIES else "single_article"
     )
-    manual_source = city in OFFLINE_CITIES
+    manual_source = city in OFFLINE_CITIES or offline is not None
     unit_eligible = bool(offline and offline["publication_eligible"]) if manual_source else True
     source_identity_valid = _source_identity_valid(city, row["id"], row["url"])
     source_date_valid = _source_date_valid(row["published"])
@@ -185,7 +192,7 @@ def audit_source(city: str, db_path: str | Path | None = None) -> dict:
                     reasons.add("local_database_incompatible")
                 else:
                     scopes = _scope_rows(db)
-                    offline = _offline_rows(db) if city in OFFLINE_CITIES else {}
+                    offline = _offline_rows(db)
                     native = _dortmund_ids(db) if city == "dortmund" else {}
                     scans = _checkpoint_scans(db, city)
                     records = [_record(row, city=city, scope=scopes.get(row["id"]),
@@ -212,6 +219,10 @@ def audit_source(city: str, db_path: str | Path | None = None) -> dict:
         reasons.add("city_scope_review_pending")
     if any(row["source_error_present"] for row in records):
         reasons.add("source_fetch_errors_present")
+    if any(row["manually_supplied"] for row in records):
+        reasons.add("manual_source_authenticity_unverified")
+    if any(row["source_record_type"] != "single_article" for row in records):
+        reasons.add("multi_event_units_unsplit")
     candidates = [
         {key: row[key] for key in (
             "source_id", "source_url", "source_date", "source_sha256", "revision",

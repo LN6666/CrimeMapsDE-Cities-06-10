@@ -40,8 +40,8 @@ CITIES: dict[str, CitySpec] = {
         ".runtime/cities/dortmund/police.sqlite",
     ),
     "bremen": CitySpec(
-        "bremen", "Bremen", 25832, "native_police_archive_manual_input",
-        "https://www.polizei.bremen.de/news/pressestelle/pressearchiv-5034",
+        "bremen", "Bremen", 25832, "police_authored_newsroom",
+        "https://www.presseportal.de/blaulicht/nr/35235",
         ".runtime/cities/bremen/police.sqlite",
     ),
 }
