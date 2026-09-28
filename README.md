@@ -63,6 +63,25 @@ uv run python -m crimemapsde_cities_06_10.source_audit --city dortmund \
 
 `location_candidates` 只是供后续逐篇定位审核的来源引用，没有坐标。必须有匹配城市官方来源格式的 URL/ID、带时区的日期、当前原文与匹配哈希、有效修订号和与该哈希绑定的市域证据，才可能出现于该列表。Stuttgart 的列表地域不算市域证据；Leipzig 通报和人工补入的 Bremen 原生分组页是多事件单元，即使后来有市域标注，也不产生定位候选。Bremen 新闻室里的单篇公告仍需当前正文绑定的市域审核。清单内文章复核状态当前一律为 `pending`，所有者仍需检查并批准。组级 `archive_complete` 与 `publication_ready` 仍明确为 `false`；在线逐篇来源核验不代表年度覆盖、语义复核或发布完成。
 
+## 来源绑定的 LLM 复核决定
+
+`review_decisions.py` 只导入已经由 LLM 读完官方原文后写出的决定，不用关键词判断公告是否为案件、案件数量、地点或市域。入口与 source-review pack 约定的三个输出文件对应：
+
+```sh
+uv run python -m crimemapsde_cities_06_10.review_decisions \
+  --city dortmund \
+  --db .runtime/cities/dortmund/police.sqlite \
+  --review-decisions .runtime/review/dortmund/review-decisions.delta.ndjson \
+  --scope-decisions .runtime/review/dortmund/scope-decisions.delta.ndjson \
+  --scene-decisions .runtime/review/dortmund/scene-decisions.delta.json
+```
+
+三个文件必须覆盖完全相同的 `source_id` 集合，并在每条记录中重复 `schema_version: 1`、`city`、`source_id`、`source_url` 和 `source_sha256`。这些字段必须与本地检查点的当前正文完全一致。review 文件另含 `verdict`、逐字 `evidence_quotes`、`review_note`、`reviewer` 和带时区的 `reviewed_at`；scope 文件另含 `scope_verdict`（`in_city`、`out_of_city`、`mixed` 或 `uncertain`）及逐字引文。
+
+scene 文件是 `{"schema_version":1,"city":"...","articles":[...]}`。每篇必须明确给出非负 `incident_count`、同样长度的 `incidents`、完整 `formal_locations`，并把 `incidents_complete` 与 `formal_locations_complete` 显式设为 `true`。每个案件及每个正式地点都要有能在当前完整正文中逐字找到的引文；一个案件可以引用多个地点，一篇也可以包含多个案件。零案件和零地点是允许的显式决定。街道、区域、区级及未知精度地点不得带代表点坐标，后续 GIS 阶段应保留整条道路或面，无法确定的几何继续为空。
+
+导入在全部记录验证通过后才原子写入本地 `llm_review_decisions` 和历史表。源正文哈希或 URL 改变会让旧决定成为 stale；决定内容改变会生成新的 `decision_set_digest`，因此任何绑定旧摘要的后续批准都失效。导入结果始终返回 `owner_approval_required: true`、`owner_approved: false` 和 `publication_ready: false`。原文、三个决定文件及本地决定表均属于运行时材料，必须留在 Git 忽略目录中。
+
 ## Leipzig 公开档案与离线原件入口
 
 Medienservice Sachsen 的 `robots.txt` 当前明确返回 HTTP 404。RFC 9309 §2.3.1.3 将 4xx 视为规则文件不可用并允许抓取器访问；这不同于必须按完全禁止处理的网络错误和 5xx。Leipzig 采集器每次运行都重新检查：只在明确 404/410，或有效的 200 规则允许档案和文章路径时继续；401/403/429、其他 4xx、5xx、网络错误、HTML/空白/损坏规则和 `Disallow` 都会停止。采集器使用网站公开的日期筛选 JSON 后端，固定机构 `10976` 和发布者 `Polizeidirektion Leipzig`，每批限制页数与正文数，顺序请求间隔至少 4 秒，首个来源错误即停止并写入检查点。

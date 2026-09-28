@@ -25,6 +25,10 @@ reports/
 *.db
 *.db-*
 *.jsonl
+*.ndjson
+review-decisions*.json
+scope-decisions*.json
+scene-decisions*.json
 *.html
 *.pdf
 *.eml
