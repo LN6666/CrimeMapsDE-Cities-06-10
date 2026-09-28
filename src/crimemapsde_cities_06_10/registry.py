@@ -30,8 +30,8 @@ CITIES: dict[str, CitySpec] = {
         ".runtime/cities/stuttgart/police.sqlite",
     ),
     "leipzig": CitySpec(
-        "leipzig", "Leipzig", 25833, "official_media_manual_input",
-        "https://medienservice.sachsen.de/medien/?search%5Binstitution_ids%5D%5B%5D=10976",
+        "leipzig", "Leipzig", 25833, "official_media_archive",
+        "https://www.medienservice.sachsen.de/medien/?search%5Binstitution_ids%5D%5B%5D=10976",
         ".runtime/cities/leipzig/police.sqlite",
     ),
     "dortmund": CitySpec(

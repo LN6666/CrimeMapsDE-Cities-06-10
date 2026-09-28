@@ -15,11 +15,14 @@ from urllib.parse import urlparse
 from .registry import CITIES
 
 SCHEMA_VERSION = 1
-OFFLINE_CITIES = frozenset({"leipzig"})
+OFFLINE_CITIES = frozenset()
 ARTICLE_ORIGINS = {
     "dusseldorf": (("www.presseportal.de", re.compile(r"/blaulicht/pm/13248/(\d+)$")),),
     "stuttgart": (("www.presseportal.de", re.compile(r"/blaulicht/pm/110977/(\d+)$")),),
-    "leipzig": (("medienservice.sachsen.de", re.compile(r"/medien/news/(\d+)$")),),
+    "leipzig": (
+        ("medienservice.sachsen.de", re.compile(r"/medien/news/(\d+)$")),
+        ("www.medienservice.sachsen.de", re.compile(r"/medien/news/(\d+)$")),
+    ),
     "dortmund": (("dortmund.polizei.nrw", re.compile(r"/presse/([a-z0-9][a-z0-9-]+)$")),),
     "bremen": (
         ("www.presseportal.de", re.compile(r"/blaulicht/pm/35235/(\d+)$")),
@@ -71,13 +74,26 @@ def _scope_rows(db: sqlite3.Connection) -> dict[str, sqlite3.Row]:
     )}
 
 
-def _offline_rows(db: sqlite3.Connection) -> dict[str, sqlite3.Row]:
-    if not _has_table(db, "offline_source_units"):
-        return {}
-    return {row["id"]: row for row in db.execute(
-        "SELECT id,publisher,record_type,manually_supplied,publication_eligible "
-        "FROM offline_source_units"
-    )}
+def _source_units(db: sqlite3.Connection) -> dict[str, dict]:
+    units = {}
+    if _has_table(db, "offline_source_units"):
+        for row in db.execute(
+            "SELECT id,publisher,record_type,manually_supplied,publication_eligible "
+            "FROM offline_source_units"
+        ):
+            units[row["id"]] = dict(row)
+    if _has_table(db, "sachsen_source_units"):
+        for row in db.execute(
+            "SELECT id,publisher,record_type,source_verified FROM sachsen_source_units"
+        ):
+            if row["id"] in units:
+                raise ValueError("Source unit cannot be both online and manually supplied")
+            units[row["id"]] = {
+                "id": row["id"], "publisher": row["publisher"],
+                "record_type": row["record_type"], "manually_supplied": 0,
+                "publication_eligible": 0, "source_verified": row["source_verified"],
+            }
+    return units
 
 
 def _dortmund_ids(db: sqlite3.Connection) -> dict[str, sqlite3.Row]:
@@ -91,6 +107,7 @@ def _dortmund_ids(db: sqlite3.Connection) -> dict[str, sqlite3.Row]:
 def _checkpoint_scans(db: sqlite3.Connection, city: str) -> list[dict]:
     table = {"dusseldorf": "dusseldorf_archive_cursor",
              "stuttgart": "stuttgart_archive_cursor",
+             "leipzig": "sachsen_archive_cursor",
              "dortmund": "dortmund_archive_cursor",
              "bremen": "bremen_archive_cursor"}.get(city)
     if table is None or not _has_table(db, table):
@@ -125,7 +142,7 @@ def _record(row: sqlite3.Row, *, city: str, scope: sqlite3.Row | None,
     record_type = offline["record_type"] if offline else (
         "unknown_offline_unit" if city in OFFLINE_CITIES else "single_article"
     )
-    manual_source = city in OFFLINE_CITIES or offline is not None
+    manual_source = city in OFFLINE_CITIES or bool(offline and offline["manually_supplied"])
     unit_eligible = bool(offline and offline["publication_eligible"]) if manual_source else True
     source_identity_valid = _source_identity_valid(city, row["id"], row["url"])
     source_date_valid = _source_date_valid(row["published"])
@@ -192,7 +209,7 @@ def audit_source(city: str, db_path: str | Path | None = None) -> dict:
                     reasons.add("local_database_incompatible")
                 else:
                     scopes = _scope_rows(db)
-                    offline = _offline_rows(db)
+                    offline = _source_units(db)
                     native = _dortmund_ids(db) if city == "dortmund" else {}
                     scans = _checkpoint_scans(db, city)
                     records = [_record(row, city=city, scope=scopes.get(row["id"]),

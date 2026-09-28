@@ -149,7 +149,7 @@ def test_offline_units_cannot_become_location_candidates(tmp_path, city, record_
     assert result["records"][0]["location_candidate"] is False
     assert result["location_candidates"] == []
     if city == "leipzig":
-        assert "automatic_source_access_blocked" in result["readiness"]["blocking_reasons"]
+        assert "manual_source_authenticity_unverified" in result["readiness"]["blocking_reasons"]
     else:
         assert "automatic_source_access_blocked" not in result["readiness"]["blocking_reasons"]
         assert "manual_source_authenticity_unverified" in result["readiness"]["blocking_reasons"]

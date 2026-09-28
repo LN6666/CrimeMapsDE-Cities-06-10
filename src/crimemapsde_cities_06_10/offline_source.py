@@ -1,4 +1,4 @@
-"""Local checkpoint for official pages whose robots rules cannot be verified.
+"""Local checkpoint for manually supplied official source files.
 
 This reads a manually saved JSONL file only. It never fetches source articles,
 and every imported unit remains excluded from city-map publication.
@@ -23,14 +23,16 @@ from .local_document import verify_local_document
 from .storage import accept, connect, discover
 
 
-def probe_robots(origin: str, target: str, user_agent: str, *, client=None) -> RobotFileParser:
-    """Fail closed on 404, blank, redirected, or malformed robots.txt."""
+def probe_robots(origin: str, target: str, user_agent: str, *, client=None) -> RobotFileParser | None:
+    """Apply RFC 9309 to a robots probe while failing closed on ambiguous errors."""
     owned_client = client is None
     if owned_client:
         client = httpx.Client(timeout=20, follow_redirects=False, headers={"User-Agent": user_agent})
     try:
         url = origin + "/robots.txt"
         response = client.get(url)
+        if response.status_code in {404, 410} and str(response.url) == url:
+            return None
         response.raise_for_status()
         if response.status_code != 200 or str(response.url) != url:
             raise ValueError("Unexpected official robots.txt response")
@@ -190,6 +192,12 @@ def review_rows(
         has_evidence = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_evidence'"
         ).fetchone() is not None
+        has_offline = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='offline_source_units'"
+        ).fetchone() is not None
+        has_online = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sachsen_source_units'"
+        ).fetchone() is not None
         evidence_columns = (
             "e.path AS evidence_path,e.sha256 AS file_sha256,e.format AS file_format,"
             "e.text_matches_file"
@@ -197,36 +205,67 @@ def review_rows(
             "NULL AS evidence_path,NULL AS file_sha256,NULL AS file_format,NULL AS text_matches_file"
         )
         evidence_join = "LEFT JOIN local_evidence e ON e.id=r.id" if has_evidence else ""
+        offline_columns = (
+            "o.publisher AS offline_publisher,o.record_type AS offline_record_type"
+            if has_offline else "NULL AS offline_publisher,NULL AS offline_record_type"
+        )
+        offline_join = "LEFT JOIN offline_source_units o ON o.id=r.id" if has_offline else ""
+        online_columns = (
+            "s.publisher AS online_publisher,s.record_type AS online_record_type,"
+            "s.source_sha256 AS canonical_source_sha256,s.raw_html_sha256,s.source_verified"
+            if has_online else
+            "NULL AS online_publisher,NULL AS online_record_type,"
+            "NULL AS canonical_source_sha256,NULL AS raw_html_sha256,NULL AS source_verified"
+        )
+        online_join = "LEFT JOIN sachsen_source_units s ON s.id=r.id" if has_online else ""
         rows = []
         seen = 0
         for row in db.execute(
-            f"""SELECT r.*,u.publisher,u.record_type,{evidence_columns} FROM reports r
-               JOIN offline_source_units u ON u.id=r.id
-               {evidence_join} ORDER BY r.published,r.id"""
+            f"""SELECT r.*,{offline_columns},{online_columns},{evidence_columns} FROM reports r
+               {offline_join} {online_join} {evidence_join}
+               WHERE {'s.id IS NOT NULL OR ' if has_online else ''}{'o.id IS NOT NULL' if has_offline else '0'}
+               ORDER BY r.published,r.id"""
         ):
+            is_online = row["online_publisher"] is not None
+            if is_online == (row["offline_publisher"] is not None):
+                raise ValueError("Source unit must be exactly one of online or locally supplied")
+            source_publisher = row["online_publisher"] or row["offline_publisher"]
+            record_type = row["online_record_type"] or row["offline_record_type"]
             url = urlparse(row["url"])
             match = article_path.fullmatch(url.path)
             if (
-                row["publisher"] != publisher or row["record_type"] != "multi_event_bulletin"
-                or url.scheme != "https" or url.netloc != host or not match
+                source_publisher != publisher or record_type != "multi_event_bulletin"
+                or url.scheme != "https" or url.netloc not in {host, "www." + host} or not match
                 or match[1] != row["id"] or url.query or url.fragment
             ):
-                raise ValueError("Offline source identity mismatch")
+                raise ValueError("Source identity mismatch")
             try:
                 published = datetime.fromisoformat(row["published"])
             except ValueError as exc:
-                raise ValueError("Offline publication date invalid") from exc
+                raise ValueError("Source publication date invalid") from exc
             if published.tzinfo is None:
-                raise ValueError("Offline publication date has no time zone")
+                raise ValueError("Source publication date has no time zone")
             body = row["body"]
             if (not isinstance(body, str) or len(body) < 30
                     or hashlib.sha256(body.encode()).hexdigest() != row["sha256"]):
-                raise ValueError("Offline source body hash mismatch")
+                raise ValueError("Source body hash mismatch")
             revision = db.execute(
                 "SELECT sha256 FROM revisions WHERE id=? AND revision=?", (row["id"], row["revision"])
             ).fetchone()
             if revision is None or revision["sha256"] != row["sha256"]:
-                raise ValueError("Offline source revision hash mismatch")
+                raise ValueError("Source revision hash mismatch")
+            if is_online:
+                expected_source = hashlib.sha256(json.dumps(
+                    {
+                        "source_id": row["id"], "source_url": row["url"],
+                        "publisher": source_publisher, "title": row["title"],
+                        "published": row["published"], "body": body,
+                    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode()).hexdigest()
+                if (not row["source_verified"] or row["canonical_source_sha256"] != expected_source
+                        or not isinstance(row["raw_html_sha256"], str)
+                        or len(row["raw_html_sha256"]) != 64):
+                    raise ValueError("Online source provenance mismatch")
             if row["file_sha256"]:
                 checked = verify_local_document(row["evidence_path"], row["file_sha256"], body)
                 if checked["format"] != row["file_format"] or int(checked["text_matches_file"]) != row["text_matches_file"]:
@@ -241,8 +280,10 @@ def review_rows(
                 "source_file_sha256": row["file_sha256"], "source_file_format": row["file_format"],
                 "source_file_text_matches": bool(row["text_matches_file"]) if row["file_sha256"] else None,
                 "source_file_path": row["evidence_path"], "review_status": "pending",
-                "source_verified": False, "publication_ready": False,
-                "record_type": row["record_type"],
+                "source_verified": is_online, "publication_ready": False,
+                "record_type": record_type,
+                "canonical_source_sha256": row["canonical_source_sha256"],
+                "raw_html_sha256": row["raw_html_sha256"],
             })
             if len(rows) >= limit:
                 break
