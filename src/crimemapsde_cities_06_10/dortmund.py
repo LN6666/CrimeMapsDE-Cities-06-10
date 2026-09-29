@@ -107,27 +107,42 @@ class ArticleParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.depth = 0
         self.article_depth = None
+        self.article_nesting = 0
         self.author_depth = None
+        self.teaser_depth = None
         self.body_depth = None
         self.author = ""
+        self.teaser = []
         self.body = []
 
     def handle_starttag(self, tag, attrs):
         classes = dict(attrs).get("class", "").split()
+        if tag == "article":
+            if self.article_nesting:
+                self.article_nesting += 1
+            elif "node--type--press-release" in classes:
+                self.article_depth = self.depth
+                self.article_nesting = 1
+            return
         if tag == "div":
             self.depth += 1
-            if self.article_depth is not None and "field--name-field-press-release-author" in classes:
+            if self.article_nesting == 1 and "field--name-field-press-release-author" in classes:
                 self.author_depth = self.depth
-            elif self.article_depth is not None and "field--name-body" in classes:
+            elif self.article_nesting == 1 and "field--name-field-base-teaser-text" in classes:
+                self.teaser_depth = self.depth
+            elif self.article_nesting == 1 and "field--name-body" in classes:
                 self.body_depth = self.depth
-        elif tag == "article" and "node--type--press-release" in classes:
-            self.article_depth = self.depth
-        elif tag in {"p", "br", "li"} and self.body_depth is not None:
-            self.body.append(" ")
+        elif tag in {"p", "br", "li"}:
+            if self.teaser_depth is not None:
+                self.teaser.append(" ")
+            if self.body_depth is not None:
+                self.body.append(" ")
 
     def handle_data(self, data):
         if self.author_depth is not None:
             self.author += data
+        if self.teaser_depth is not None:
+            self.teaser.append(data)
         if self.body_depth is not None:
             self.body.append(data)
 
@@ -135,11 +150,15 @@ class ArticleParser(HTMLParser):
         if tag == "div":
             if self.author_depth == self.depth:
                 self.author_depth = None
+            if self.teaser_depth == self.depth:
+                self.teaser_depth = None
             if self.body_depth == self.depth:
                 self.body_depth = None
             self.depth -= 1
-        elif tag == "article" and self.article_depth == self.depth:
-            self.article_depth = None
+        elif tag == "article" and self.article_nesting:
+            self.article_nesting -= 1
+            if not self.article_nesting:
+                self.article_depth = None
 
 
 def listing_rows(page: str) -> list[dict]:
@@ -155,9 +174,14 @@ def listing_rows(page: str) -> list[dict]:
 def article_body(page: str) -> tuple[str, str]:
     parser = ArticleParser()
     parser.feed(page)
-    body = " ".join(" ".join(parser.body).split())
+    teaser = " ".join(" ".join(parser.teaser).split())
+    main_body = " ".join(" ".join(parser.body).split())
+    sections = [part for part in (teaser, main_body) if part]
+    if len(sections) == 2 and sections[0] == sections[1]:
+        sections.pop()
+    body = " ".join(sections)
     node = re.search(r'"currentPath":"node/(\d+)"', page.replace("\\/", "/"))
-    if parser.author.strip() != "Polizei Dortmund" or len(body) < 30 or not node:
+    if parser.author.strip() != "Polizei Dortmund" or len(main_body) < 30 or len(body) < 30 or not node:
         raise ValueError("Dortmund article publisher, body, or node ID check failed")
     return body, node[1]
 

@@ -29,7 +29,12 @@ def listing(records, next_page=""):
 def article(author="Polizei Dortmund", place="Nordmarkt", native_id="217132"):
     return (
         '<article class="node node--type--press-release">'
+        '<article class="node node--type-image">'
+        '<div class="field--name-body"><p>Bildbeschreibung außerhalb des Meldungstextes.</p></div>'
+        '</article>'
         f'<div class="field--name-field-press-release-author">{author}</div>'
+        '<div class="field--name-field-base-teaser-text">Lfd. Nr.: 0805<br />'
+        'Am Sonntag begann der Einsatz in Dortmund.</div>'
         '<div class="field--name-body"><p>Am Nordmarkt in Dortmund wurde ein Mann beraubt.</p>'
         f'<p>Die Tat ereignete sich nahe {place}; die Ermittlungen dauern an.</p></div>'
         '</article><aside><p>Andere Stadt, anderer Fall</p></aside>'
@@ -49,6 +54,8 @@ def test_native_listing_and_body_keep_source_identity_without_city_assumption():
     assert dortmund.next_url(page) == dortmund.ARCHIVE + "?page=1"
     body, node_id = dortmund.article_body(article())
     assert node_id == "217132" and "Nordmarkt" in body
+    assert body.startswith("Lfd. Nr.: 0805 Am Sonntag begann der Einsatz in Dortmund.")
+    assert "Bildbeschreibung" not in body
     assert "Andere Stadt" not in body
     with pytest.raises(ValueError, match="publisher"):
         dortmund.article_body(article(author="Polizei Hamm"))
