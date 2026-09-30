@@ -350,3 +350,50 @@ def test_changed_decision_changes_digest_and_preserves_runtime_history(tmp_path)
     assert second["owner_approved"] is False and second["publication_ready"] is False
     assert db.execute("SELECT count(*) FROM llm_review_history").fetchone()[0] == 2
     db.close()
+
+
+def test_reviewed_moving_transit_route_roundtrip(tmp_path):
+    db = connect(tmp_path / "sources.sqlite")
+    route_quote = "Der Vorfall geschah in der fahrenden Stadtbahn U15."
+    add_source(db, body=BODY + " " + route_quote)
+    files = decision_files(tmp_path, body=BODY + " " + route_quote)
+    _, _, scenes, write, *_ = files
+    location = scenes["articles"][0]["formal_locations"][0]
+    location.update(precision="route", coordinates=None, label="Moving U15; actual segment unknown",
+                    evidence_quotes=[route_quote], transit_route={
+                        "mode": "subway", "line": "U15", "extent": "full_line",
+                        "evidence_quote": route_quote,
+                    })
+    write()
+    assert run_import(db, files)["inserted"] == 1
+    stored = current_supported_decisions(db, CITY)[0]["scene_inventory"]["formal_locations"][0]
+    assert stored["transit_route"] == location["transit_route"]
+    assert stored["coordinates"] is None
+    assert run_import(db, files, imported_at=4)["unchanged"] == 1
+    db.close()
+
+
+@pytest.mark.parametrize("invalid", ["metadata", "coordinates", "evidence"])
+def test_transit_route_rejects_omission_points_and_fabricated_evidence(tmp_path, invalid):
+    db = connect(tmp_path / "sources.sqlite")
+    add_source(db)
+    files = decision_files(tmp_path)
+    run_import(db, files)
+    prior = current_supported_decisions(db, CITY)
+    _, _, scenes, write, *_ = files
+    location = scenes["articles"][0]["formal_locations"][0]
+    location.update(precision="route", coordinates=None, transit_route={
+        "mode": "subway", "line": "U15", "extent": "full_line", "evidence_quote": QUOTE_ONE,
+    })
+    if invalid == "metadata":
+        location.pop("transit_route")
+    elif invalid == "coordinates":
+        location["coordinates"] = [7.4, 51.5]
+    else:
+        location["transit_route"]["evidence_quote"] = "Fabricated journey evidence."
+    write()
+    with pytest.raises(ValueError):
+        run_import(db, files)
+    assert current_supported_decisions(db, CITY) == prior
+    assert db.execute("SELECT count(*) FROM llm_review_history").fetchone()[0] == 1
+    db.close()

@@ -82,7 +82,7 @@ uv run python -m crimemapsde_cities_06_10.review_decisions \
 
 scene 文件是 `{"schema_version":1,"city":"...","articles":[...]}`。每篇必须明确给出非负 `incident_count`、同样长度的 `incidents`、完整 `formal_locations`，并把 `incidents_complete` 与 `formal_locations_complete` 显式设为 `true`。每个案件及每个正式地点都要有能在当前完整正文中逐字找到的引文；一个案件可以引用多个地点，一篇也可以包含多个案件。零案件和零地点是允许的显式决定。街道、区域、区级及未知精度地点不得带代表点坐标，后续 GIS 阶段应保留整条道路或面，无法确定的几何继续为空。
 
-场景可另存可核查的 `event_time`（`display`、ISO `date` 或 `null`、`precision`、逐字 `evidence_quote`）及 `details`。正式地点可另存显式 `poi_contexts`（类型、`along_geometry` / `near_geometry` / `named_object`、半径和逐字证据）；`[]` 表示已明确判断无该关联，缺失字段表示尚未补核。导入器只验证并保存 LLM 的决定，不推断日期、案情或 POI。旧决定保持兼容，但旧版字段缺失不证明符合最新完整语义标准。
+场景可另存可核查的 `event_time`（`display`、ISO `date` 或 `null`、`precision`、逐字 `evidence_quote`）及 `details`。正式地点可另存显式 `poi_contexts`（类型、`along_geometry` / `near_geometry` / `named_object`、半径和逐字证据）；`[]` 表示已明确判断无该关联，缺失字段表示尚未补核。导入器只验证并保存 LLM 的决定，不推断日期、案情或 POI。移动交通地点另可用 `precision: route` 与逐字证据绑定的 `transit_route`（`mode`、`line`、`full_line` / `source_segment`）；线路不得携带生成点，后捕车站不能替代车内案发地点。旧决定保持兼容，但旧版字段缺失不证明符合最新完整语义标准。
 
 导入在全部记录验证通过后才原子写入本地 `llm_review_decisions` 和历史表。源正文哈希或 URL 改变会让旧决定成为 stale；决定内容改变会生成新的 `decision_set_digest`，因此任何绑定旧摘要的后续批准都失效。导入结果始终返回 `owner_approval_required: true`、`owner_approved: false` 和 `publication_ready: false`。原文、三个决定文件及本地决定表均属于运行时材料，必须留在 Git 忽略目录中。
 

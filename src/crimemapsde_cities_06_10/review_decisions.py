@@ -35,8 +35,8 @@ LOCATION_ROLES = {
     "background",
     "unknown",
 }
-LOCATION_PRECISIONS = {"point", "address", "street", "place", "area", "district", "unknown"}
-NO_POINT_PRECISIONS = {"street", "area", "district", "unknown"}
+LOCATION_PRECISIONS = {"point", "address", "street", "place", "area", "district", "route", "unknown"}
+NO_POINT_PRECISIONS = {"street", "area", "district", "route", "unknown"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 IDENTITY_KEYS = {"schema_version", "city", "source_id", "source_url", "source_sha256"}
@@ -57,7 +57,9 @@ SCENE_KEYS = IDENTITY_KEYS | {
 }
 INCIDENT_KEYS = {"incident_id", "evidence_quotes", "formal_location_ids"}
 INCIDENT_OPTIONAL_KEYS = {"event_time", "details"}
-LOCATION_OPTIONAL_KEYS = {"poi_contexts"}
+LOCATION_OPTIONAL_KEYS = {"poi_contexts", "transit_route"}
+TRANSIT_MODES = {"bus", "tram", "subway", "train", "ferry", "other"}
+TRANSIT_EXTENTS = {"full_line", "source_segment"}
 EVENT_TIME_PRECISIONS = {"exact", "approximate", "date", "range", "unknown"}
 POI_CONTEXT_SCOPES = {"along_geometry", "near_geometry", "named_object"}
 POI_KIND = re.compile(r"^[a-z][a-z0-9_:-]*$")
@@ -127,6 +129,26 @@ def _event_time(value: object, body: str, label: str) -> dict | None:
         "display": display,
         "date": event_date,
         "precision": value["precision"],
+        "evidence_quote": _quotes([value["evidence_quote"]], body, label)[0],
+    }
+
+
+def _transit_route(value: object, body: str, precision: str, label: str) -> dict | None:
+    if value is None:
+        if precision == "route":
+            raise ValueError(f"{label} route requires transit metadata")
+        return None
+    value = _require_exact_keys(value, {"mode", "line", "extent", "evidence_quote"}, label)
+    line = _normalized(value["line"]) if isinstance(value["line"], str) else ""
+    if (
+        precision != "route"
+        or value["mode"] not in TRANSIT_MODES
+        or not line
+        or value["extent"] not in TRANSIT_EXTENTS
+    ):
+        raise ValueError(f"{label} has invalid transit route")
+    return {
+        "mode": value["mode"], "line": line, "extent": value["extent"],
         "evidence_quote": _quotes([value["evidence_quote"]], body, label)[0],
     }
 
@@ -343,6 +365,9 @@ def _validate_scenes(value: dict, body: str, ident: str, label: str) -> dict:
                 ),
             }
         )
+        transit = _transit_route(location.get("transit_route"), body, location["precision"], item_label)
+        if transit is not None:
+            normalized_locations[-1]["transit_route"] = transit
         contexts = _poi_contexts(location.get("poi_contexts"), body, item_label)
         if contexts is not None:
             normalized_locations[-1]["poi_contexts"] = contexts
