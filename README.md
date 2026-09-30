@@ -5,7 +5,7 @@
 | 城市 | 当前进度 | 来源 |
 | --- | --- | --- |
 | Düsseldorf | 警方署名新闻室采集；逐篇市域证据审核门禁 | [Polizei Düsseldorf 新闻室](https://www.presseportal.de/blaulicht/nr/13248) |
-| Stuttgart | 警方署名新闻室采集；列表地域仅作审核线索 | [Polizeipräsidium Stuttgart 新闻室](https://www.presseportal.de/blaulicht/nr/110977) |
+| Stuttgart | 1,060 / 1,060 | 警方链接新闻室历史通道遍历完成、0 缺失正文、0 来源错误；1,060 篇当前来源首轮决定全部支持，保留 1,718 个来源场景、2,803 个正式地点；2,060 个市内几何请求全部决定（1,749 解析、311 明确保留未定位）；地图分类完成 460 / 1,050 篇，剩余 590 篇。已补齐 15 个场景时间/详情及 26 个地点 POI 判断，仍缺 1,703 个场景时间/详情和 2,777 个地点 POI 判断；当前语义标准尚未全量完成，所有者批准与地图构建待完成 |
 | Leipzig | 官方 Medienservice 的公开日期检索有界采集；逐篇场景与市域审核门禁 | [萨克森警方档案](https://www.polizei.sachsen.de/de/111350.htm) → [官方 Medienservice](https://www.medienservice.sachsen.de/medien/?search%5Binstitution_ids%5D%5B%5D=10976) |
 | Dortmund | 官方原生档案有界采集、断点与市域审核门禁 | [Polizei Dortmund 原生档案](https://dortmund.polizei.nrw/presse/pressemitteilungen) |
 | Bremen | 警方署名 Presseportal 新闻室可逐篇断点采集；原生分组档案因空 robots.txt 只作人工补充 | [Polizei Bremen 新闻室](https://www.presseportal.de/blaulicht/nr/35235) / [原生档案](https://www.polizei.bremen.de/news/pressestelle/pressearchiv-5034) |
@@ -19,7 +19,7 @@
 | 城市 | 当前检查点 | 仍待处理 |
 | --- | ---: | --- |
 | Düsseldorf | 394 / 394 | 警方署名新闻室通道遍历完成、0 缺失正文、0 来源错误；394 篇当前决定已全部支持，保留 661 个案件、965 个正式地点；689 个市内几何请求全部决定（456 解析、233 明确保留未定位）；最终地图语义复核完成 292/292 篇、499 个案件，确认 181 篇犯罪公告和 46 个来源可证的公告计数点；本地未批准候选保留 808 个正式地点、6,899 个 POI 和 287 个切片，仍待所有者检查并明确批准 |
-| Stuttgart | 1,060 / 1,060 | 警方链接新闻室历史通道遍历完成、0 缺失正文、0 来源错误；1,060 篇当前来源决定全部支持，保留 1,717 个案件、2,801 个正式地点；2,058 个市内几何请求全部决定（1,748 解析、310 明确保留未定位）；最终地图语义复核已完成 450 / 1,050 篇并通过来源哈希、逐字证据、事件覆盖和主计数点门禁，剩余 600 篇，随后仍需所有者检查、明确批准和获准地图构建 |
+| Stuttgart | 1,060 / 1,060 | 警方链接新闻室历史通道遍历完成、0 缺失正文、0 来源错误；1,060 篇当前来源首轮决定全部支持，保留 1,718 个来源场景、2,803 个正式地点；2,060 个市内几何请求全部决定（1,749 解析、311 明确保留未定位）；地图分类完成 460 / 1,050 篇，剩余 590 篇。已补齐 15 个场景时间/详情及 26 个地点 POI 判断，仍缺 1,703 个场景时间/详情和 2,777 个地点 POI 判断；当前语义标准尚未全量完成，所有者批准与地图构建待完成 |
 | Leipzig | 346 / 346 | 官方 Medienservice 2026 通道 58 页遍历完成、0 缺失正文、0 来源错误；多案件市域与场景复核待完成 |
 | Dortmund | 735 / 735 | 警方原生档案 2026 通道遍历完成；735 篇均已重新抓取页面单独显示的 teaser 与主正文，来源 ID/URL 不变、正文哈希全部更新、0 缺失正文、0 来源错误；旧输入哈希已废止，修正后全文的市域与逐篇语义复核待完成 |
 | Bremen | 639 / 639 | 警方署名新闻室的 2026 遍历已完成；仍需逐篇市域、多场景复核，且不证明原生档案等价 |
@@ -81,6 +81,8 @@ uv run python -m crimemapsde_cities_06_10.review_decisions \
 三个文件必须覆盖完全相同的 `source_id` 集合，并在每条记录中重复 `schema_version: 1`、`city`、`source_id`、`source_url` 和 `source_sha256`。这些字段必须与本地检查点的当前正文完全一致。review 文件另含 `verdict`、逐字 `evidence_quotes`、`review_note`、`reviewer` 和带时区的 `reviewed_at`；scope 文件另含 `scope_verdict`（`in_city`、`out_of_city`、`mixed` 或 `uncertain`）及逐字引文。
 
 scene 文件是 `{"schema_version":1,"city":"...","articles":[...]}`。每篇必须明确给出非负 `incident_count`、同样长度的 `incidents`、完整 `formal_locations`，并把 `incidents_complete` 与 `formal_locations_complete` 显式设为 `true`。每个案件及每个正式地点都要有能在当前完整正文中逐字找到的引文；一个案件可以引用多个地点，一篇也可以包含多个案件。零案件和零地点是允许的显式决定。街道、区域、区级及未知精度地点不得带代表点坐标，后续 GIS 阶段应保留整条道路或面，无法确定的几何继续为空。
+
+场景可另存可核查的 `event_time`（`display`、ISO `date` 或 `null`、`precision`、逐字 `evidence_quote`）及 `details`。正式地点可另存显式 `poi_contexts`（类型、`along_geometry` / `near_geometry` / `named_object`、半径和逐字证据）；`[]` 表示已明确判断无该关联，缺失字段表示尚未补核。导入器只验证并保存 LLM 的决定，不推断日期、案情或 POI。旧决定保持兼容，但旧版字段缺失不证明符合最新完整语义标准。
 
 导入在全部记录验证通过后才原子写入本地 `llm_review_decisions` 和历史表。源正文哈希或 URL 改变会让旧决定成为 stale；决定内容改变会生成新的 `decision_set_digest`，因此任何绑定旧摘要的后续批准都失效。导入结果始终返回 `owner_approval_required: true`、`owner_approved: false` 和 `publication_ready: false`。原文、三个决定文件及本地决定表均属于运行时材料，必须留在 Git 忽略目录中。
 

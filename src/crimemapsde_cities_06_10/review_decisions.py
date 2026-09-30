@@ -15,7 +15,7 @@ import math
 import re
 import sqlite3
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .registry import CITIES
@@ -56,6 +56,11 @@ SCENE_KEYS = IDENTITY_KEYS | {
     "formal_locations",
 }
 INCIDENT_KEYS = {"incident_id", "evidence_quotes", "formal_location_ids"}
+INCIDENT_OPTIONAL_KEYS = {"event_time", "details"}
+LOCATION_OPTIONAL_KEYS = {"poi_contexts"}
+EVENT_TIME_PRECISIONS = {"exact", "approximate", "date", "range", "unknown"}
+POI_CONTEXT_SCOPES = {"along_geometry", "near_geometry", "named_object"}
+POI_KIND = re.compile(r"^[a-z][a-z0-9_:-]*$")
 LOCATION_KEYS = {
     "location_id",
     "label",
@@ -91,6 +96,70 @@ def _require_exact_keys(value: object, expected: set[str], label: str) -> dict:
             f"{label} has missing fields {sorted(missing)} or unknown fields {sorted(extra)}"
         )
     return value
+
+
+def _require_core_keys(value: object, required: set[str], optional: set[str], label: str) -> dict:
+    if not isinstance(value, dict):
+        raise TypeError(f"{label} must be an object")
+    missing = required - set(value)
+    extra = set(value) - required - optional
+    if missing or extra:
+        raise ValueError(f"{label} has missing fields {sorted(missing)} or unknown fields {sorted(extra)}")
+    return value
+
+
+def _event_time(value: object, body: str, label: str) -> dict | None:
+    if value is None:
+        return None
+    value = _require_exact_keys(value, {"display", "date", "precision", "evidence_quote"}, label)
+    display = _normalized(value["display"]) if isinstance(value["display"], str) else ""
+    if not display or value["precision"] not in EVENT_TIME_PRECISIONS:
+        raise ValueError(f"{label} has invalid event time")
+    event_date = value["date"]
+    if event_date is not None:
+        if not isinstance(event_date, str):
+            raise ValueError(f"{label} has invalid event date")
+        try:
+            date.fromisoformat(event_date)
+        except ValueError as exc:
+            raise ValueError(f"{label} has invalid event date") from exc
+    return {
+        "display": display,
+        "date": event_date,
+        "precision": value["precision"],
+        "evidence_quote": _quotes([value["evidence_quote"]], body, label)[0],
+    }
+
+
+def _poi_contexts(value: object, body: str, label: str) -> list[dict] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise TypeError(f"{label} POI contexts must be a list")
+    normalized = []
+    seen = set()
+    for context in value:
+        context = _require_exact_keys(context, {"kind", "scope", "radius_m", "evidence_quote"}, label)
+        kind, scope, radius = context["kind"], context["scope"], context["radius_m"]
+        if (
+            not isinstance(kind, str)
+            or not POI_KIND.fullmatch(kind)
+            or scope not in POI_CONTEXT_SCOPES
+            or type(radius) not in {int, float}
+            or not math.isfinite(radius)
+            or radius < 0
+            or radius > 500
+            or (scope == "near_geometry" and radius == 0)
+            or (scope != "near_geometry" and radius != 0)
+            or (kind, scope, radius) in seen
+        ):
+            raise ValueError(f"{label} has invalid POI context")
+        seen.add((kind, scope, radius))
+        normalized.append({
+            "kind": kind, "scope": scope, "radius_m": radius,
+            "evidence_quote": _quotes([context["evidence_quote"]], body, label)[0],
+        })
+    return normalized
 
 
 def _read_ndjson(path: Path, label: str) -> list[dict]:
@@ -243,7 +312,7 @@ def _validate_scenes(value: dict, body: str, ident: str, label: str) -> dict:
     location_ids = set()
     for number, location in enumerate(locations, start=1):
         item_label = f"{label} formal location {number}"
-        location = _require_exact_keys(location, LOCATION_KEYS, item_label)
+        location = _require_core_keys(location, LOCATION_KEYS, LOCATION_OPTIONAL_KEYS, item_label)
         location_id = location["location_id"]
         if (
             not isinstance(location_id, str)
@@ -274,12 +343,15 @@ def _validate_scenes(value: dict, body: str, ident: str, label: str) -> dict:
                 ),
             }
         )
+        contexts = _poi_contexts(location.get("poi_contexts"), body, item_label)
+        if contexts is not None:
+            normalized_locations[-1]["poi_contexts"] = contexts
 
     normalized_incidents = []
     incident_ids = set()
     for number, incident in enumerate(incidents, start=1):
         item_label = f"{label} incident {number}"
-        incident = _require_exact_keys(incident, INCIDENT_KEYS, item_label)
+        incident = _require_core_keys(incident, INCIDENT_KEYS, INCIDENT_OPTIONAL_KEYS, item_label)
         incident_id = incident["incident_id"]
         if (
             not isinstance(incident_id, str)
@@ -302,6 +374,14 @@ def _validate_scenes(value: dict, body: str, ident: str, label: str) -> dict:
                 "formal_location_ids": references,
             }
         )
+        event_time = _event_time(incident.get("event_time"), body, item_label)
+        if event_time is not None:
+            normalized_incidents[-1]["event_time"] = event_time
+        if "details" in incident:
+            details = _normalized(incident["details"]) if isinstance(incident["details"], str) else ""
+            if not details:
+                raise ValueError(f"{item_label} has invalid details")
+            normalized_incidents[-1]["details"] = details
     return {
         "incident_count": incident_count,
         "incidents_complete": True,

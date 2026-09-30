@@ -189,6 +189,71 @@ def test_explicit_zero_incident_and_empty_location_inventory_is_allowed(tmp_path
     db.close()
 
 
+def test_semantic_supplement_preserves_unknown_time_and_explicit_poi_assessments(tmp_path):
+    db = connect(tmp_path / "sources.sqlite")
+    add_source(db)
+    files = decision_files(tmp_path)
+    run_import(db, files)
+    legacy = current_supported_decisions(db, CITY)[0]
+    _, _, scenes, write, *_ = files
+    article = scenes["articles"][0]
+    article["incidents"][0].update(
+        event_time={"display": "Original offence time not disclosed", "date": None,
+                    "precision": "unknown", "evidence_quote": QUOTE_ONE},
+        details="Robbery at Nordmarkt; later arrest remains a separate location role.",
+    )
+    article["formal_locations"][0]["poi_contexts"] = [
+        {"kind": "public_space", "scope": "named_object", "radius_m": 0,
+         "evidence_quote": QUOTE_ONE}
+    ]
+    article["formal_locations"][1]["poi_contexts"] = []
+    write()
+    result = run_import(db, files, imported_at=4)
+    assert (result["changed"], result["unchanged"]) == (1, 0)
+    current = current_supported_decisions(db, CITY)[0]
+    assert current["source_sha256"] == legacy["source_sha256"]
+    inventory = current["scene_inventory"]
+    assert inventory["incidents"][0]["event_time"]["date"] is None
+    assert inventory["incidents"][0]["event_time"]["precision"] == "unknown"
+    assert inventory["incidents"][0]["details"] == article["incidents"][0]["details"]
+    assert inventory["formal_locations"][0]["poi_contexts"] == article["formal_locations"][0]["poi_contexts"]
+    assert inventory["formal_locations"][1]["poi_contexts"] == []
+    assert inventory["formal_locations"][2]["role"] == "arrest"
+    assert "poi_contexts" not in inventory["formal_locations"][2]
+    assert run_import(db, files, imported_at=5)["unchanged"] == 1
+    assert db.execute("SELECT count(*) FROM llm_review_history").fetchone()[0] == 2
+    assert result["owner_approved"] is False and result["publication_ready"] is False
+    db.close()
+
+
+@pytest.mark.parametrize("component", ["event_time", "poi_context"])
+def test_invalid_supplement_evidence_cannot_replace_the_previous_review(tmp_path, component):
+    db = connect(tmp_path / "sources.sqlite")
+    add_source(db)
+    files = decision_files(tmp_path)
+    run_import(db, files)
+    prior = current_supported_decisions(db, CITY)
+    _, _, scenes, write, *_ = files
+    article = scenes["articles"][0]
+    fabricated = "Invented location or time evidence absent from the original narrative."
+    if component == "event_time":
+        article["incidents"][0]["event_time"] = {
+            "display": "Unknown", "date": None, "precision": "unknown",
+            "evidence_quote": fabricated,
+        }
+    else:
+        article["formal_locations"][0]["poi_contexts"] = [
+            {"kind": "public_space", "scope": "named_object", "radius_m": 0,
+             "evidence_quote": fabricated}
+        ]
+    write()
+    with pytest.raises(ValueError, match="absent from the current source body"):
+        run_import(db, files, imported_at=4)
+    assert current_supported_decisions(db, CITY) == prior
+    assert db.execute("SELECT count(*) FROM llm_review_history").fetchone()[0] == 1
+    db.close()
+
+
 @pytest.mark.parametrize("component", ["review", "scope", "incident", "location"])
 def test_every_semantic_level_requires_a_verbatim_full_text_quote(tmp_path, component):
     db = connect(tmp_path / "sources.sqlite")
