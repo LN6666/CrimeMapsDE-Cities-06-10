@@ -28,9 +28,16 @@ NEWSROOM = ORIGIN + "/blaulicht/nr/110977"
 PUBLISHER = "Polizeipräsidium Stuttgart"
 USER_AGENT = "CrimeMapsDE-Cities-06-10/0.1 (Stuttgart police newsroom index)"
 ARTICLE_PATH = re.compile(r"/blaulicht/pm/110977/(\d+)$")
+POLICE_ARTICLE_PATH = re.compile(r"/blaulicht/pm/(\d+)/(\d+)$")
 PAGE_PATH = re.compile(r"/blaulicht/nr/110977(?:/\d+)?$")
 NEXT_PAGE = re.compile(r'<link\s+rel="next"\s+href="([^"]+)"')
 CITY_LOCATION = re.compile(r"Stuttgart(?:-[\wÄÖÜäöüß ]+)?$", re.IGNORECASE)
+RELAY_BODY = re.compile(
+    r"^(?P<dateline>.{1,120}\(ots\))\s+"
+    r"(?:Anbei|Unter\s+(?:dem\s+)?folgende[mn]?\s+Link)\b.{0,220}?"
+    r"(?P<url>https://www\.presseportal\.de/blaulicht/pm/\d+/\d+)\s*\.?$",
+    re.IGNORECASE,
+)
 
 
 class NewsroomParser(HTMLParser):
@@ -125,15 +132,23 @@ class ArticleParser(HTMLParser):
         self.current = []
         self.in_customer = False
         self.customer = ""
+        self.in_title = False
+        self.title = []
+        self.published = ""
 
     def handle_starttag(self, tag, attrs):
-        classes = dict(attrs).get("class", "").split()
+        attributes = dict(attrs)
+        classes = attributes.get("class", "").split()
         if tag == "article" and "story" in classes:
             self.in_story = True
+        elif self.in_story and tag == "time" and attributes.get("datetime"):
+            self.published = attributes["datetime"]
         elif self.in_story and tag == "p" and "customer" in classes:
             self.in_customer = True
-        elif self.in_story and self.after_heading and tag == "p":
-            if "contact-headline" in classes or "originator" in classes:
+        elif self.in_story and tag == "h1":
+            self.in_title = True
+        elif self.in_story and self.after_heading and tag in {"p", "pre"}:
+            if tag == "p" and ("contact-headline" in classes or "originator" in classes):
                 self.stopped = True
             elif not self.stopped:
                 self.in_paragraph = True
@@ -142,6 +157,8 @@ class ArticleParser(HTMLParser):
     def handle_data(self, data):
         if self.in_customer:
             self.customer += data
+        if self.in_title:
+            self.title.append(data)
         if self.in_paragraph:
             self.current.append(data)
 
@@ -149,8 +166,9 @@ class ArticleParser(HTMLParser):
         if not self.in_story:
             return
         if tag == "h1":
+            self.in_title = False
             self.after_heading = True
-        elif tag == "p":
+        elif tag in {"p", "pre"}:
             self.in_customer = False
             if self.in_paragraph:
                 paragraph = " ".join(" ".join(self.current).split())
@@ -161,13 +179,53 @@ class ArticleParser(HTMLParser):
             self.in_story = False
 
 
-def article_body(page: str) -> str:
+def article_document(page: str, *, expected_publisher: str | None = PUBLISHER) -> dict:
     parser = ArticleParser()
     parser.feed(page)
     body = " ".join(parser.parts)
-    if parser.customer.strip() != PUBLISHER or len(body) < 30:
+    publisher = " ".join(parser.customer.split())
+    title = " ".join("".join(parser.title).split())
+    if (
+        (expected_publisher is not None and publisher != expected_publisher)
+        or not publisher.startswith("Polizeipräsidium ")
+        or not title
+        or len(body) < 30
+    ):
         raise ValueError("Stuttgart article parser or publisher check failed")
-    return body
+    try:
+        published = datetime.fromisoformat(parser.published).isoformat()
+    except ValueError as exc:
+        raise ValueError("Stuttgart article publication time is missing or invalid") from exc
+    return {
+        "title": title,
+        "published": published,
+        "publisher": publisher,
+        "body": body,
+    }
+
+
+def article_body(page: str) -> str:
+    return article_document(page)["body"]
+
+
+def relay_target(body: str) -> str | None:
+    """Return a sole explicit police-release relay URL, never a general inline link."""
+    match = RELAY_BODY.fullmatch(" ".join(body.split()))
+    if not match:
+        return None
+    url = match["url"]
+    parsed = urlparse(url)
+    article = POLICE_ARTICLE_PATH.fullmatch(parsed.path)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "www.presseportal.de"
+        or parsed.query
+        or parsed.fragment
+        or article is None
+        or article[1] == "110977"
+    ):
+        return None
+    return url
 
 
 def scope_lead(locations: list[str]) -> tuple[str, str]:
@@ -202,13 +260,18 @@ def sync(path: str | Path, year: int, *, pages: int = 1, limit: int = 5, delay: 
              historical_scan_complete INTEGER NOT NULL, updated REAL NOT NULL);
            CREATE TABLE IF NOT EXISTS stuttgart_review_leads (
              id TEXT PRIMARY KEY, listing_location TEXT NOT NULL,
-             scope_hint TEXT NOT NULL, updated REAL NOT NULL);"""
+             scope_hint TEXT NOT NULL, updated REAL NOT NULL);
+           CREATE TABLE IF NOT EXISTS stuttgart_relay_sources (
+             parent_id TEXT NOT NULL, relay_id TEXT NOT NULL,
+             relay_url TEXT NOT NULL, publisher TEXT,
+             updated REAL NOT NULL, PRIMARY KEY(parent_id,relay_id));"""
     )
     started = time.time()
     stats = {
         "year": year, "requested_pages": pages, "archive_pages": 0,
         "head_refreshed": False, "discovered": 0, "new": 0,
         "revised": 0, "unchanged": 0, "failed": 0,
+        "relay_discovered": 0, "relay_fetched": 0,
         "historical_scan_complete": False, "coverage_complete": False,
     }
     db.execute("INSERT INTO runs(started) VALUES(?)", (started,))
@@ -217,15 +280,8 @@ def sync(path: str | Path, year: int, *, pages: int = 1, limit: int = 5, delay: 
         with httpx.Client(
             timeout=25, follow_redirects=False, headers={"User-Agent": USER_AGENT},
         ) as client:
-            for attempt in range(3):
-                try:
-                    robots_response = client.get(ORIGIN + "/robots.txt")
-                    robots_response.raise_for_status()
-                    break
-                except (httpx.TransportError, httpx.HTTPStatusError):
-                    if attempt == 2:
-                        raise
-                    time.sleep(2**attempt)
+            robots_response = client.get(ORIGIN + "/robots.txt")
+            robots_response.raise_for_status()
             if (
                 robots_response.status_code != 200
                 or str(robots_response.url) != ORIGIN + "/robots.txt"
@@ -241,32 +297,27 @@ def sync(path: str | Path, year: int, *, pages: int = 1, limit: int = 5, delay: 
                 nonlocal last_request
                 for _ in range(4):
                     parsed = urlparse(url)
+                    base_path = PAGE_PATH.fullmatch(parsed.path) or ARTICLE_PATH.fullmatch(parsed.path)
+                    police_article = POLICE_ARTICLE_PATH.fullmatch(parsed.path)
+                    known_relay = bool(
+                        police_article
+                        and db.execute(
+                            """SELECT 1 FROM stuttgart_relay_sources
+                               WHERE relay_id=? AND relay_url=? LIMIT 1""",
+                            (police_article[2], url),
+                        ).fetchone()
+                    )
                     if (
                         parsed.scheme != "https" or parsed.netloc != "www.presseportal.de"
-                        or not (PAGE_PATH.fullmatch(parsed.path) or ARTICLE_PATH.fullmatch(parsed.path))
+                        or not (base_path or known_relay)
                         or parsed.query or parsed.fragment
                     ):
                         raise ValueError("Unexpected Stuttgart newsroom URL")
                     if not robots.can_fetch(USER_AGENT, url):
                         raise ValueError("robots.txt disallows " + url)
-                    for attempt in range(3):
-                        time.sleep(max(0, delay - (time.monotonic() - last_request)))
-                        last_request = time.monotonic()
-                        try:
-                            response = client.get(url, headers=headers)
-                        except httpx.TransportError:
-                            if attempt == 2:
-                                raise
-                            time.sleep(2**attempt)
-                            continue
-                        if response.status_code in {429, 500, 502, 503, 504}:
-                            if attempt == 2:
-                                response.raise_for_status()
-                            retry_after = response.headers.get("retry-after", "")
-                            wait = int(retry_after) if retry_after.isdigit() else 2**attempt
-                            time.sleep(min(30, max(delay, wait)))
-                            continue
-                        break
+                    time.sleep(max(0, delay - (time.monotonic() - last_request)))
+                    last_request = time.monotonic()
+                    response = client.get(url, headers=headers)
                     if response.status_code in {301, 302, 303, 307, 308}:
                         target = urljoin(str(response.url), response.headers["location"])
                         if urlparse(target).path != parsed.path:
@@ -340,6 +391,39 @@ def sync(path: str | Path, year: int, *, pages: int = 1, limit: int = 5, delay: 
             stats["historical_scan_complete"] = bool(state["historical_scan_complete"])
             # An ongoing year's new issues and post-hoc corrections still need revisits.
             stats["coverage_complete"] = bool(state["historical_scan_complete"] and year < datetime.now(UTC).year)
+            relay_parents = db.execute(
+                """SELECT id,published,body FROM reports
+                   WHERE url LIKE 'https://www.presseportal.de/blaulicht/pm/110977/%'
+                   AND body IS NOT NULL ORDER BY published,id"""
+            ).fetchall()
+            for parent in relay_parents:
+                relay_url = relay_target(parent["body"])
+                if relay_url is None:
+                    continue
+                match = POLICE_ARTICLE_PATH.fullmatch(urlparse(relay_url).path)
+                assert match is not None
+                relay_id = match[2]
+                inserted = db.execute(
+                    """INSERT OR IGNORE INTO stuttgart_relay_sources
+                       (parent_id,relay_id,relay_url,publisher,updated)
+                       VALUES(?,?,?,NULL,?)""",
+                    (parent["id"], relay_id, relay_url, time.time()),
+                ).rowcount
+                db.execute(
+                    """INSERT OR IGNORE INTO reports
+                       (id,url,title,published,district,first_seen)
+                       VALUES(?,?,?,?,?,?)""",
+                    (
+                        relay_id,
+                        relay_url,
+                        f"Relayed official police release {relay_id}",
+                        parent["published"],
+                        f"relay from Stuttgart source {parent['id']}",
+                        time.time(),
+                    ),
+                )
+                stats["relay_discovered"] += inserted
+            db.commit()
             pending = db.execute(
                 """SELECT * FROM reports WHERE published>=? AND published<? AND retry_after<=?
                    AND (body IS NULL OR checked IS NULL OR checked<? OR published>=?)
@@ -369,14 +453,40 @@ def sync(path: str | Path, year: int, *, pages: int = 1, limit: int = 5, delay: 
                         db.commit()
                         result = "unchanged"
                     else:
-                        result = accept(db, row["id"], article_body(response.text), response.headers, time.time())
+                        if ARTICLE_PATH.fullmatch(urlparse(row["url"]).path):
+                            body = article_body(response.text)
+                        else:
+                            document = article_document(response.text, expected_publisher=None)
+                            body = document["body"]
+                            db.execute(
+                                "UPDATE reports SET title=?,published=?,district=? WHERE id=?",
+                                (
+                                    document["title"],
+                                    document["published"],
+                                    f"relay:{document['publisher']}",
+                                    row["id"],
+                                ),
+                            )
+                            db.execute(
+                                """UPDATE stuttgart_relay_sources SET publisher=?,updated=?
+                                   WHERE relay_id=? AND relay_url=?""",
+                                (document["publisher"], time.time(), row["id"], row["url"]),
+                            )
+                            stats["relay_fetched"] += 1
+                        result = accept(db, row["id"], body, response.headers, time.time())
                     stats[result] += 1
                 except (httpx.HTTPError, ValueError) as exc:
+                    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                     fail(
                         db, row["id"], f"{type(exc).__name__}: {exc}", time.time(),
-                        exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None,
+                        status,
                     )
                     stats["failed"] += 1
+                    stats["stopped_on_source_error"] = {
+                        "source_id": row["id"], "http_status": status,
+                        "error_type": type(exc).__name__,
+                    }
+                    break
             bounds = (f"{year}-01-01", f"{year + 1}-01-01")
             stats["stored"] = db.execute(
                 "SELECT count(*) FROM reports WHERE published>=? AND published<? AND body IS NOT NULL", bounds,

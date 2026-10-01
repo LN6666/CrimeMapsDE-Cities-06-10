@@ -95,6 +95,7 @@ class ArticleParser(HTMLParser):
         self.customer = ""
         self.parts = []
         self.current = []
+        self.block_tag = None
 
     def handle_starttag(self, tag, attrs):
         classes = dict(attrs).get("class", "").split()
@@ -108,6 +109,11 @@ class ArticleParser(HTMLParser):
             elif not self.stopped:
                 self.in_paragraph = True
                 self.current = []
+                self.block_tag = tag
+        elif self.in_story and self.after_heading and tag == "pre" and not self.stopped:
+            self.in_paragraph = True
+            self.current = []
+            self.block_tag = tag
 
     def handle_data(self, data):
         if self.in_customer:
@@ -122,11 +128,18 @@ class ArticleParser(HTMLParser):
             self.after_heading = True
         elif tag == "p":
             self.in_customer = False
-            if self.in_paragraph:
+            if self.in_paragraph and self.block_tag == tag:
                 paragraph = " ".join(" ".join(self.current).split())
                 if paragraph and not paragraph.startswith("Schneller informiert:"):
                     self.parts.append(paragraph)
                 self.in_paragraph = False
+                self.block_tag = None
+        elif tag == "pre" and self.in_paragraph and self.block_tag == tag:
+            paragraph = " ".join(" ".join(self.current).split())
+            if paragraph:
+                self.parts.append(paragraph)
+            self.in_paragraph = False
+            self.block_tag = None
         elif tag == "article":
             self.in_story = False
 
@@ -248,7 +261,7 @@ def sync(path, year, *, full=False, limit=30, delay=1.0, max_pages=None):
     started = time.time()
     stats = {"year": year, "full_archive_scan": full, "archive_complete": False,
              "archive_pages": 0, "discovered": 0, "new": 0, "revised": 0,
-             "unchanged": 0, "failed": 0}
+             "unchanged": 0, "failed": 0, "stopped_on_source_error": None}
     db.execute("INSERT INTO runs(started) VALUES(?)", (started,))
     db.commit()
     with httpx.Client(timeout=25, follow_redirects=False,
@@ -342,9 +355,15 @@ def sync(path, year, *, full=False, limit=30, delay=1.0, max_pages=None):
                                     response.headers, time.time())
                 stats[result] += 1
             except (httpx.HTTPError, ValueError) as exc:
+                status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 fail(db, row["id"], f"{type(exc).__name__}: {exc}", time.time(),
-                     exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None)
+                     status)
                 stats["failed"] += 1
+                stats["stopped_on_source_error"] = {
+                    "source_id": row["id"], "http_status": status,
+                    "error_type": type(exc).__name__,
+                }
+                break
         stats["stored"] = db.execute("SELECT count(*) FROM reports WHERE body IS NOT NULL").fetchone()[0]
         stats["pending"] = db.execute("SELECT count(*) FROM reports WHERE body IS NULL").fetchone()[0]
         stats["errors"] = db.execute("SELECT count(*) FROM reports WHERE error IS NOT NULL").fetchone()[0]

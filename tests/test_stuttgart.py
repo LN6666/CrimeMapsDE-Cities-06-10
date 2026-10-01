@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from crimemapsde_cities_06_10 import stuttgart
-from crimemapsde_cities_06_10.storage import accept, connect
+from crimemapsde_cities_06_10.storage import accept, connect, discover
 
 
 def listing(records, next_page=""):
@@ -24,6 +24,7 @@ def article(publisher="Polizeipräsidium Stuttgart", place="Marktplatz"):
     return (
         '<nav>Fremde Straße, die nicht zur Meldung gehört</nav>'
         '<article class="col eight story mbs">'
+        '<p class="date"><time datetime="2026-09-27 12:03:04">27.09.2026</time></p>'
         f'<p class="customer"><a>{publisher}</a></p>'
         '<h1>POL-S: Synthetische Meldung</h1>'
         f'<p>Stuttgart (ots) - Eine Person berichtete über einen Vorfall am {place}. '
@@ -67,6 +68,41 @@ def test_article_excludes_navigation_contacts_and_foreign_publisher():
     assert "Irrestraße" not in body
     with pytest.raises(ValueError, match="publisher"):
         stuttgart.article_body(article(publisher="Polizeipräsidium Ludwigsburg"))
+
+
+def test_article_accepts_legacy_preformatted_body():
+    page = article().replace(
+        '<p>Stuttgart (ots) - Eine Person berichtete über einen Vorfall am Marktplatz. '
+        'Der eigentliche Sachverhalt wird hier nur für einen Parser-Test beschrieben.</p>',
+        '<p>Stuttgart-Stammheim (ots)</p><pre>Eine Person berichtete über einen Vorfall '
+        'am Marktplatz. Der vollständige ältere Meldungstext steht in einem pre-Element.</pre>',
+    )
+    body = stuttgart.article_body(page)
+    assert "Stuttgart-Stammheim (ots)" in body
+    assert "vollständige ältere Meldungstext" in body
+    assert "Falschestraße" not in body
+
+
+def test_article_document_and_single_release_relay_are_source_only():
+    document = stuttgart.article_document(article(), expected_publisher=None)
+    assert document["publisher"] == "Polizeipräsidium Stuttgart"
+    assert document["title"] == "POL-S: Synthetische Meldung"
+    assert document["published"] == "2026-09-27T12:03:04"
+    relay = (
+        "Stuttgart/Ludwigsburg (ots) Unter folgendem Link finden Sie eine "
+        "Pressemitteilung des Polizeipräsidiums Ludwigsburg: "
+        "https://www.presseportal.de/blaulicht/pm/110974/6248353 ."
+    )
+    assert stuttgart.relay_target(relay) == (
+        "https://www.presseportal.de/blaulicht/pm/110974/6248353"
+    )
+    assert stuttgart.relay_target(
+        relay + " Weitere eigene Tatsachen stehen in diesem Absatz."
+    ) is None
+    assert stuttgart.relay_target(
+        "Stuttgart (ots) Unter folgendem Link: "
+        "https://www.presseportal.de/blaulicht/pm/110977/6248353"
+    ) is None
 
 
 class FakeClient:
@@ -152,6 +188,63 @@ def test_bounded_scan_resumes_and_keeps_body_and_hash_local(tmp_path, monkeypatc
     assert third_run["cursor_pages_scanned"] == 2
 
 
+def test_explicit_relay_is_saved_as_its_own_official_source(tmp_path, monkeypatch):
+    parent_id = "6199393"
+    relay_id = "6199066"
+    relay_url = stuttgart.ORIGIN + f"/blaulicht/pm/110976/{relay_id}"
+    parent_body = (
+        "Esslingen / Stuttgart (ots) Anbei eine Pressemitteilung des "
+        "Polizeipräsidiums Reutlingen: " + relay_url
+    )
+    db_path = tmp_path / "relay.sqlite"
+    db = connect(db_path)
+    discover(
+        db,
+        [{
+            "id": parent_id,
+            "url": stuttgart.ORIGIN + f"/blaulicht/pm/110977/{parent_id}",
+            "title": "POL-S: Verweis auf andere Polizeimeldung",
+            "published": "2026-01-19T14:21:00",
+            "district": "Esslingen / Stuttgart",
+        }],
+        1,
+    )
+    accept(db, parent_id, parent_body, {}, 1)
+    db.close()
+
+    requested = []
+    pages = {
+        stuttgart.ORIGIN + "/robots.txt": (200, "User-agent: *\nDisallow: /images/\n"),
+        stuttgart.NEWSROOM: (
+            200,
+            listing([(parent_id, "19.01.2026 &ndash; 14:21", "Esslingen / Stuttgart")]),
+        ),
+        relay_url: (200, article(publisher="Polizeipräsidium Reutlingen")),
+    }
+    monkeypatch.setattr(stuttgart.httpx, "Client", lambda **_: FakeClient(pages, requested))
+    monkeypatch.setattr(stuttgart.time, "sleep", lambda _: None)
+
+    result = stuttgart.sync(db_path, 2026, limit=1)
+    assert result["relay_discovered"] == 1
+    assert result["relay_fetched"] == 1
+    assert relay_url in requested
+    db = connect(db_path)
+    relay = db.execute(
+        "SELECT url,title,published,district,body FROM reports WHERE id=?", (relay_id,)
+    ).fetchone()
+    assert relay["url"] == relay_url
+    assert relay["title"] == "POL-S: Synthetische Meldung"
+    assert relay["published"] == "2026-09-27T12:03:04"
+    assert relay["district"] == "relay:Polizeipräsidium Reutlingen"
+    assert "Marktplatz" in relay["body"]
+    link = db.execute(
+        "SELECT parent_id,publisher FROM stuttgart_relay_sources WHERE relay_id=?",
+        (relay_id,),
+    ).fetchone()
+    assert tuple(link) == (parent_id, "Polizeipräsidium Reutlingen")
+    db.close()
+
+
 def test_robots_disallow_stops_before_archive_request(tmp_path, monkeypatch):
     requested = []
     pages = {stuttgart.ORIGIN + "/robots.txt": (200, "User-agent: *\nDisallow: /blaulicht/\n")}
@@ -162,4 +255,64 @@ def test_robots_disallow_stops_before_archive_request(tmp_path, monkeypatch):
     assert requested == [stuttgart.ORIGIN + "/robots.txt"]
     db = connect(db_path)
     assert db.execute("SELECT count(*) FROM reports").fetchone()[0] == 0
+    db.close()
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("target", ["robots", "listing"])
+def test_first_source_status_stops_without_retry(tmp_path, monkeypatch, status, target):
+    requested = []
+    robots_url = stuttgart.ORIGIN + "/robots.txt"
+    pages = {
+        robots_url: (status if target == "robots" else 200, "User-agent: *\nDisallow: /images/\n"),
+        stuttgart.NEWSROOM: (status, "unavailable"),
+    }
+    monkeypatch.setattr(stuttgart.httpx, "Client", lambda **_: FakeClient(pages, requested))
+    monkeypatch.setattr(stuttgart.time, "sleep", lambda _: None)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        stuttgart.sync(tmp_path / "stopped.sqlite", 2026)
+    assert requested == ([robots_url] if target == "robots" else [robots_url, stuttgart.NEWSROOM])
+
+
+@pytest.mark.parametrize("status", [429, 503, 200])
+def test_first_article_error_stops_batch_and_preserves_pending(tmp_path, monkeypatch, status):
+    requested = []
+    first_id, second_id = "6359823", "6352287"
+    first_url = stuttgart.ORIGIN + f"/blaulicht/pm/110977/{first_id}"
+    second_url = stuttgart.ORIGIN + f"/blaulicht/pm/110977/{second_id}"
+    pages = {
+        stuttgart.ORIGIN + "/robots.txt": (200, "User-agent: *\nDisallow: /images/\n"),
+        stuttgart.NEWSROOM: (
+            200,
+            listing([
+                (first_id, "27.09.2026 &ndash; 12:03", "Stuttgart"),
+                (second_id, "26.09.2026 &ndash; 12:03", "Ludwigsburg"),
+            ]),
+        ),
+        first_url: (
+            status,
+            article(publisher="Polizeipräsidium Ludwigsburg") if status == 200 else "unavailable",
+        ),
+        second_url: (200, article()),
+    }
+    monkeypatch.setattr(stuttgart.httpx, "Client", lambda **_: FakeClient(pages, requested))
+    monkeypatch.setattr(stuttgart.time, "sleep", lambda _: None)
+
+    result = stuttgart.sync(tmp_path / "articles.sqlite", 2026, limit=2)
+    assert result["failed"] == 1
+    assert result["pending"] == 2
+    assert result["stopped_on_source_error"] == {
+        "source_id": first_id,
+        "http_status": None if status == 200 else status,
+        "error_type": "ValueError" if status == 200 else "HTTPStatusError",
+    }
+    assert requested.count(first_url) == 1
+    assert second_url not in requested
+    db = connect(tmp_path / "articles.sqlite")
+    first = db.execute("SELECT body,http_status,failures,error FROM reports WHERE id=?", (first_id,)).fetchone()
+    second = db.execute("SELECT body,error FROM reports WHERE id=?", (second_id,)).fetchone()
+    assert first["body"] is None and first["http_status"] == result["stopped_on_source_error"]["http_status"]
+    assert first["failures"] == 1 and first["error"]
+    assert second["body"] is None and second["error"] is None
     db.close()

@@ -55,6 +55,19 @@ def test_article_body_requires_matching_police_publisher_and_omits_contacts():
         article_body(ARTICLE.replace("Polizei Düsseldorf</a>", "Anderer Herausgeber</a>"))
 
 
+def test_article_body_preserves_preformatted_source_lists():
+    page = ARTICLE.replace(
+        "<p>Zeuginnen und Zeugen werden gesucht.</p>",
+        "<pre>Bilanz:\n1. Verstoß gegen das Versammlungsgesetz\n"
+        "2. Drei weitere Strafanzeigen</pre>"
+        "<p>Zeuginnen und Zeugen werden gesucht.</p>",
+    )
+    body = article_body(page)
+    assert "Bilanz: 1. Verstoß gegen das Versammlungsgesetz" in body
+    assert "2. Drei weitere Strafanzeigen" in body
+    assert "Am Polizeipräsidium" not in body
+
+
 def test_city_export_requires_current_source_bound_city_decision(tmp_path):
     db = connect(tmp_path / "police.sqlite")
     local, outside = listing_rows(LISTING)
@@ -135,3 +148,36 @@ def test_full_archive_resumes_older_page_and_refreshes_new_head(tmp_path, monkey
     assert second["archive_complete"] is True
     assert second["cursor_pages_scanned"] == 2
     assert requested.count("/blaulicht/nr/13248/30") == 1
+
+
+@pytest.mark.parametrize("status", [429, 503, "invalid_publisher"])
+def test_first_article_source_error_stops_remaining_requests(tmp_path, monkeypatch, status):
+    requested = []
+
+    def handler(request):
+        requested.append(request.url.path)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if request.url.path == "/blaulicht/nr/13248":
+            return httpx.Response(200, text=LISTING)
+        if request.url.path == "/blaulicht/pm/13248/6359792":
+            if status == "invalid_publisher":
+                return httpx.Response(200, text=ARTICLE.replace(
+                    "Polizei Düsseldorf</a>", "Anderer Herausgeber</a>"
+                ))
+            return httpx.Response(status, text="source unavailable")
+        raise AssertionError(f"Unexpected request after source error: {request.url}")
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        dusseldorf.httpx, "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    monkeypatch.setattr(dusseldorf.time, "sleep", lambda _: None)
+    result = sync(tmp_path / "police.sqlite", 2026, full=True, max_pages=1, limit=2, delay=1)
+    assert requested == ["/robots.txt", "/blaulicht/nr/13248", "/blaulicht/pm/13248/6359792"]
+    assert result["failed"] == 1 and result["pending"] == 2
+    assert result["stopped_on_source_error"]["source_id"] == "6359792"
+    assert result["stopped_on_source_error"]["http_status"] == (
+        None if status == "invalid_publisher" else status
+    )
