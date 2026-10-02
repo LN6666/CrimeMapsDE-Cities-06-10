@@ -1,4 +1,9 @@
-<p><img src="docs/assets/city-icon.png" width="112" height="112" alt="杜塞尔多夫城市图标：深蓝底色上的象牙白莱茵电视塔剪影"></p>
+<!-- crimemaps:visual-home:start -->
+<p><img src="assets/brand/police-eagle.png" width="72" height="72" alt="CrimeMaps项目标识：戴警帽的深蓝鹰"> <img src="docs/assets/city-icon.png" width="64" height="64" alt="杜塞尔多夫城市图标：深蓝底色上的象牙白莱茵电视塔剪影"></p>
+<p><img src="assets/brand/crime-map-en.github.svg" width="320" alt="CrimeMaps Germany"> <img src="assets/brand/crime-map-de.github.svg" width="320" alt="CrimeMaps Deutschland"></p>
+<p><img src="docs/assets/cityscape.jpg" width="420" alt="杜塞尔多夫: AI城市风光日景"> <img src="docs/assets/cityscape-night.jpg" width="420" alt="杜塞尔多夫: AI城市风光夜景"></p>
+<p><sub>AI生成的城市日景和夜景示意图，图片不对应警方公告中的事件。</sub></p>
+<!-- crimemaps:visual-home:end -->
 
 # CrimeMaps 杜塞尔多夫：警方公告地图
 
@@ -45,6 +50,10 @@ CrimeMaps还在初版阶段，公告覆盖和地点识别有局限，译文与�
 <a id="sources"></a>
 
 ## 来源与覆盖范围
+
+<!-- crimemaps:police-website:start -->
+[警察官网](https://duesseldorf.polizei.nrw/)
+<!-- crimemaps:police-website:end -->
 
 公告来源: [Polizei Düsseldorf / Presseportal](https://www.presseportal.de/blaulicht/nr/13248).
 
