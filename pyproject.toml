@@ -1,25 +1,20 @@
 [project]
-name = "crimemapsde-cities-06-10"
+name = "crimemapsberlin"
 version = "0.1.0"
-description = "Local police-announcement source intake for German cities 06–10"
+description = "Berlin police reports, hexagon maps and evidence-linked urban places"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
-dependencies = ["httpx>=0.28,<1"]
-
+dependencies = ["shapely>=2.0,<3", "pyproj>=3.7,<4", "httpx>=0.28,<1", "defusedxml>=0.7,<1", "osmium>=4,<5"]
 [dependency-groups]
 dev = ["pytest>=9,<10", "ruff>=0.14,<1"]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
 [tool.hatch.build.targets.wheel]
-packages = ["src/crimemapsde_cities_06_10"]
-
+packages = ["src/crimemapsberlin"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["tests"]
-
+testpaths = ["test_suite/safety"]
 [tool.ruff]
 line-length = 110
 target-version = "py312"

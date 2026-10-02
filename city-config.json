@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "city": "dusseldorf",
+  "repository": "crimemaps-Dusseldorf",
+  "base_path": "/crimemaps-Dusseldorf/",
+  "artifact_budget_bytes": 900000000,
+  "publication_ready": false
+}
