@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "city": "dusseldorf",
+  "locale": "zh",
+  "layout": "stacked",
+  "presentation": "world_map_and_rank",
+  "path": "docs/assets/visitors-by-country.zh.mobile.svg",
+  "sha256": "66b7228c601574bf345d8e38f9dc852e8eb288c8f57510f42e3080c60b707654",
+  "source_kind": "not_connected",
+  "collection_status": "not_connected",
+  "metric": null,
+  "source": null,
+  "generated_at_utc": null
+}
